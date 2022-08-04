@@ -1,0 +1,37 @@
+# Old config.guess isn't arm64-aware. Pull a new one in from automake.
+build_package_freshen_automake_config() {
+  {
+    brew install automake
+    cp `brew --prefix automake`/share/automake-*/config.{guess,sub} .
+  } >&4 2>&1
+}
+
+# https://bugs.ruby-lang.org/issues/1382
+build_package_patch_lex_c99() {
+  patch -p1 --force <<EOF
+diff --git a/lex.c b/lex.c
+index a15309d502..35a2f03052 100644
+--- a/lex.c
++++ b/lex.c
+@@ -68,7 +68,7 @@ hash (str, len)
+ #ifdef __GNUC__
+ __inline
+ #endif
+-struct kwtable *
++static struct kwtable *
+ rb_reserved_word (str, len)
+      register const char *str;
+      register unsigned int len;
+EOF
+}
+
+# Clang errors on warnings. Tell it to ignore this one.
+export RUBY_CFLAGS="-Wno-error=implicit-function-declaration"
+
+# M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
+brew install basecamp/dev/openssl@1.0
+package_option ruby configure --with-openssl-dir="$(brew --prefix basecamp/dev/openssl@1.0)"
+
+require_gcc
+install_package "ruby-1.8.7-p374" "https://cache.ruby-lang.org/pub/ruby/1.8/ruby-1.8.7-p374.tar.bz2#b4e34703137f7bfb8761c4ea474f7438d6ccf440b3d35f39cc5e4d4e239c07e3" freshen_automake_config patch_lex_c99 auto_tcltk standard
+install_package "rubygems-1.8.23" "https://rubygems.org/rubygems/rubygems-1.8.23.tgz#e4a1c6bbaac411eaab94deae78228b7584033a1f10a022f52bffa9613aa29061" ruby
