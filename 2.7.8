@@ -1,6 +1,20 @@
-export RUBY_CFLAGS="-O3 -march=native -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
+install_gem() {
+  RBENV_VERSION="$VERSION_NAME" rbenv-exec gem install "$@"
+}
+
+install_bundler() {
+  install_gem bundler -v "< 3"
+}
+
+export RUBY_CFLAGS="-O3 -march=native"
+
+# GCC will complain about unrecognized warnings
+if cc -v 2>&1 | grep clang >/dev/null; then
+  export RUBY_CFLAGS="$RUBY_CFLAGS -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion"
+fi
 
 package_option ruby configure --with-out-ext=tcl --with-out-ext=tk --disable-install-doc
 
 install_package "openssl-1.1.1w" "https://www.openssl.org/source/openssl-1.1.1w.tar.gz#cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8" openssl
 install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0" enable_shared standard
+install_bundler

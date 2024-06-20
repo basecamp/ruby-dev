@@ -6,14 +6,29 @@ build_package_freshen_automake_config() {
   } >&4 2>&1
 }
 
+install_gem() {
+  RBENV_VERSION="$VERSION_NAME" rbenv-exec gem install "$@"
+}
+
+install_bundler() {
+  install_gem bundler -v "< 2"
+}
+
 # Suppress warnings we aren't going to address so they don't flood build output"
-export RUBY_CFLAGS="-Wno-implicit-function-declaration -Wno-compound-token-split-by-macro"
+if cc -v 2>&1 | grep clang >/dev/null; then
+  export RUBY_CFLAGS="-Wno-implicit-function-declaration -Wno-compound-token-split-by-macro"
+fi
 
 # M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
-brew install basecamp/dev/openssl@1.0
-openssl_prefix_path="$(brew --prefix basecamp/dev/openssl@1.0)"
-package_option ruby configure --with-openssl-dir="$openssl_prefix_path"
-export PKG_CONFIG_PATH="$openssl_prefix_path/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+if type -p brew >/dev/null; then
+  brew install basecamp/dev/openssl@1.0
+  openssl_prefix_path="$(brew --prefix basecamp/dev/openssl@1.0)"
+  package_option ruby configure --with-openssl-dir="$openssl_prefix_path"
+  export PKG_CONFIG_PATH="$openssl_prefix_path/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+else
+  install_package "openssl-1.0.2u" "https://www.openssl.org/source/openssl-1.0.2u.tar.gz#ecd0c6ffb493dd06707d38b14bb4d8c2288bb7033735606569d8f90f89669d16" openssl --if needs_openssl:0.9.6-1.0.x
+fi
 
 package_option ruby configure --with-out-ext=tk --disable-install-doc
 install_package "ruby-2.3.3" "https://cache.ruby-lang.org/pub/ruby/2.3/ruby-2.3.3.tar.bz2#882e6146ed26c6e78c02342835f5d46b86de95f0dc4e16543294bc656594cc5b" freshen_automake_config ldflags_dirs standard verify_openssl
+install_bundler

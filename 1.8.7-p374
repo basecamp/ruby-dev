@@ -34,11 +34,17 @@ install_bundler() {
 }
 
 # Clang errors on warnings. Tell it to ignore this one.
-export RUBY_CFLAGS="-Wno-error=implicit-function-declaration"
+if cc -v 2>&1 | grep clang >/dev/null; then
+  export RUBY_CFLAGS="-Wno-error=implicit-function-declaration"
+fi
 
 # M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
-brew install basecamp/dev/openssl@1.0
-package_option ruby configure --with-openssl-dir="$(brew --prefix basecamp/dev/openssl@1.0)"
+if type -p brew >/dev/null; then
+  brew install basecamp/dev/openssl@1.0
+  package_option ruby configure --with-openssl-dir="$(brew --prefix basecamp/dev/openssl@1.0)"
+else
+  install_package "openssl-1.0.2u" "https://www.openssl.org/source/openssl-1.0.2u.tar.gz#ecd0c6ffb493dd06707d38b14bb4d8c2288bb7033735606569d8f90f89669d16" openssl --if needs_openssl:0.9.6-1.0.x
+fi
 
 require_gcc
 install_package "ruby-1.8.7-p374" "https://cache.ruby-lang.org/pub/ruby/1.8/ruby-1.8.7-p374.tar.bz2#b4e34703137f7bfb8761c4ea474f7438d6ccf440b3d35f39cc5e4d4e239c07e3" freshen_automake_config patch_lex_c99 auto_tcltk standard
