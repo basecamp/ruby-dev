@@ -6,12 +6,8 @@ build_package_freshen_automake_config() {
   } >&4 2>&1
 }
 
-install_gem() {
-  RBENV_VERSION="$VERSION_NAME" rbenv-exec gem install "$@"
-}
-
 install_bundler() {
-  install_gem bundler -v "< 2"
+  "$PREFIX_PATH"/bin/gem install bundler:1.17.3
 }
 
 # Suppress warnings we aren't going to address so they don't flood build output"

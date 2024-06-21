@@ -25,12 +25,8 @@ index a15309d502..35a2f03052 100644
 EOF
 }
 
-install_gem() {
-  RBENV_VERSION="$VERSION_NAME" rbenv-exec gem install "$@"
-}
-
 install_bundler() {
-  install_gem bundler -v "< 2"
+  "$PREFIX_PATH"/bin/gem install bundler:1.17.3
 }
 
 # Clang errors on warnings. Tell it to ignore this one.

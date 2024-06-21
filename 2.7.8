@@ -1,9 +1,5 @@
-install_gem() {
-  RBENV_VERSION="$VERSION_NAME" rbenv-exec gem install "$@"
-}
-
 install_bundler() {
-  install_gem bundler -v "< 3"
+  "$PREFIX_PATH"/bin/gem install bundler:2.4.22
 }
 
 export RUBY_CFLAGS="-O3 -march=native"
