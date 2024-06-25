@@ -31,7 +31,7 @@ install_bundler() {
 
 # Clang errors on warnings. Tell it to ignore this one.
 if cc -v 2>&1 | grep clang >/dev/null; then
-  export RUBY_CFLAGS="-Wno-error=implicit-function-declaration"
+  export RUBY_CFLAGS="$RUBY_CFLAGS -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
 fi
 
 # M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
