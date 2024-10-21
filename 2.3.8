@@ -10,10 +10,25 @@ install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler:1.17.3
 }
 
-# Suppress warnings we aren't going to address so they don't flood build output"
-if cc -v 2>&1 | grep clang >/dev/null; then
-  export RUBY_CFLAGS="-Wno-implicit-function-declaration -Wno-compound-token-split-by-macro"
-fi
+RUBY_CFLAGS=""
+case "$(cc -v 2>&1)" in
+  *gcc*)
+    RUBY_CFLAGS+=" -Wno-discarded-qualifiers"
+    RUBY_CFLAGS+=" -Wno-implicit-int"
+    RUBY_CFLAGS+=" -Wno-incompatible-pointer-types"
+    RUBY_CFLAGS+=" -Wno-int-conversion"
+    RUBY_CFLAGS+=" -Wno-return-type"
+    ;;
+  *clang*)
+    RUBY_CFLAGS+=" -Wno-compound-token-split-by-macro"
+    RUBY_CFLAGS+=" -Wno-implicit-function-declaration"
+    RUBY_CFLAGS+=" -Wno-implicit-int"
+    RUBY_CFLAGS+=" -Wno-incompatible-function-pointer-types"
+    RUBY_CFLAGS+=" -Wno-int-conversion"
+    RUBY_CFLAGS+=" -Wno-return-type"
+    ;;
+esac
+export RUBY_CFLAGS
 
 # M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
 if type -p brew >/dev/null; then

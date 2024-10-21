@@ -2,14 +2,25 @@ install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler:2.3.27
 }
 
-export RUBY_CFLAGS="-O3 -march=native"
+RUBY_CFLAGS="-O3 -march=native"
+case "$(cc -v 2>&1)" in
+  *gcc*)
+    RUBY_CFLAGS+=" -Wno-discarded-qualifiers"
+    RUBY_CFLAGS+=" -Wno-incompatible-pointer-types"
+    RUBY_CFLAGS+=" -Wno-int-conversion"
+    RUBY_CFLAGS+=" -Wno-return-type"
+    ;;
+  *clang*)
+    RUBY_CFLAGS+=" -Wno-compound-token-split-by-macro"
+    RUBY_CFLAGS+=" -Wno-implicit-function-declaration"
+    RUBY_CFLAGS+=" -Wno-incompatible-function-pointer-types"
+    RUBY_CFLAGS+=" -Wno-int-conversion"
+    RUBY_CFLAGS+=" -Wno-return-type"
+    ;;
+esac
+export RUBY_CFLAGS
 
 package_option ruby configure --with-out-ext=tcl --with-out-ext=tk --disable-install-doc
-
-# GCC will complain about unrecognized warnings
-if cc -v 2>&1 | grep clang >/dev/null; then
-  export RUBY_CFLAGS="$RUBY_CFLAGS -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=compound-token-split-by-macro -Wno-error=implicit-function-declaration"
-fi
 
 install_package "openssl-1.1.1w" "https://www.openssl.org/source/openssl-1.1.1w.tar.gz#cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8" openssl
 install_package "ruby-2.5.9" "https://cache.ruby-lang.org/pub/ruby/2.5/ruby-2.5.9.tar.bz2#bebbe3fe7899acd3ca2f213de38158709555e88a13f85ba5dc95239654bcfeeb" enable_shared standard
