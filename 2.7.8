@@ -9,6 +9,8 @@ case "$(cc -v 2>&1)" in
     RUBY_CFLAGS+=" -Wno-incompatible-pointer-types"
     RUBY_CFLAGS+=" -Wno-int-conversion"
     RUBY_CFLAGS+=" -Wno-return-type"
+    # GCC 15 porting: Use -std=gnu99 with relaxed type checking
+    RUBY_CFLAGS+=" -std=gnu99 -Wno-error=implicit-function-declaration"
     ;;
   *clang*)
     RUBY_CFLAGS+=" -Wno-incompatible-function-pointer-types"

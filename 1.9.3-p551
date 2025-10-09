@@ -1,9 +1,11 @@
 # Old config.guess isn't arm64-aware. Pull a new one in from automake.
 build_package_freshen_automake_config() {
-  {
-    brew install automake
-    cp `brew --prefix automake`/share/automake-*/config.{guess,sub} .
-  } >&4 2>&1
+  if type -p brew >/dev/null; then
+    {
+      brew install automake
+      cp `brew --prefix automake`/share/automake-*/config.{guess,sub} .
+    } >&4 2>&1
+  fi
 }
 
 install_bundler() {
@@ -17,6 +19,8 @@ case "$(cc -v 2>&1)" in
     RUBY_CFLAGS+=" -Wno-incompatible-pointer-types"
     RUBY_CFLAGS+=" -Wno-int-conversion"
     RUBY_CFLAGS+=" -Wno-return-type"
+    # GCC 15 porting: Use -std=gnu99 with relaxed type checking
+    RUBY_CFLAGS+=" -std=gnu99 -Wno-error=implicit-function-declaration"
     ;;
   *clang*)
     RUBY_CFLAGS+=" -Wno-compound-token-split-by-macro"
