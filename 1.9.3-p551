@@ -1,11 +1,18 @@
-# Old config.guess isn't arm64-aware. Pull a new one in from automake.
+# Old config.guess isn't arm64-aware. Pull a new one in from automake or GNU.
 build_package_freshen_automake_config() {
-  if type -p brew >/dev/null; then
-    {
+  {
+    if type -p brew >/dev/null; then
       brew install automake
-      cp `brew --prefix automake`/share/automake-*/config.{guess,sub} .
-    } >&4 2>&1
-  fi
+      cp `brew --prefix automake`/share/automake-*/config.{guess,sub} tool/
+    elif [ -d /usr/share/automake-* ]; then
+      cp /usr/share/automake-*/config.{guess,sub} tool/
+    else
+      # Download directly from GNU Savannah
+      curl -fsSL -o tool/config.guess 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+      curl -fsSL -o tool/config.sub 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD'
+      chmod +x tool/config.{guess,sub}
+    fi
+  } >&4 2>&1
 }
 
 install_bundler() {
@@ -41,5 +48,18 @@ else
 fi
 
 install_package "yaml-0.1.6" "http://pyyaml.org/download/libyaml/yaml-0.1.6.tar.gz#7da6971b4bd08a986dd2a61353bc422362bd0edcc67d7ebaac68c95f74182749" --if needs_yaml
-install_package "ruby-1.9.3-p551" "https://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p551.tar.bz2#b0c5e37e3431d58613a160504b39542ec687d473de1d4da983dabcf3c5de771e" freshen_automake_config standard
+
+# Ruby 1.9.3 has parallel make race conditions with extensions; build serially
+# Export CFLAGS so configure/make pick them up
+export CFLAGS="$RUBY_CFLAGS"
+
+build_package_standard_serial() {
+  local package_name="$1"
+  { ./configure --prefix="$PREFIX_PATH" $RUBY_CONFIGURE_OPTS
+    make -j1
+    make install
+  } >&4 2>&1
+}
+
+install_package "ruby-1.9.3-p551" "https://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p551.tar.bz2#b0c5e37e3431d58613a160504b39542ec687d473de1d4da983dabcf3c5de771e" freshen_automake_config standard_serial
 install_bundler

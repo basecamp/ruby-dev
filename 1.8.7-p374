@@ -1,11 +1,18 @@
-# Old config.guess isn't arm64-aware. Pull a new one in from automake.
+# Old config.guess isn't arm64-aware. Pull a new one in from automake or GNU.
 build_package_freshen_automake_config() {
-  if type -p brew >/dev/null; then
-    {
+  {
+    if type -p brew >/dev/null; then
       brew install automake
       cp `brew --prefix automake`/share/automake-*/config.{guess,sub} .
-    } >&4 2>&1
-  fi
+    elif [ -d /usr/share/automake-* ]; then
+      cp /usr/share/automake-*/config.{guess,sub} .
+    else
+      # Download directly from GNU Savannah
+      curl -fsSL -o config.guess 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+      curl -fsSL -o config.sub 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD'
+      chmod +x config.{guess,sub}
+    fi
+  } >&4 2>&1
 }
 
 # https://bugs.ruby-lang.org/issues/1382
