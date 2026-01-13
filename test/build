@@ -1,0 +1,131 @@
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+PLATFORMS="ubuntu-noble arch"
+VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -rV)
+
+# Use multi-platform builder if available (faster cross-arch builds)
+BUILDER=""
+if docker buildx ls 2>/dev/null | grep -A2 "^multiarch" | grep -q "running"; then
+  BUILDER="multiarch"
+fi
+
+usage() {
+  cat <<EOF
+Usage: test/build <platform> [version]
+
+Platforms: $(echo $PLATFORMS | tr ' ' ', '), all
+Versions:  $(echo $VERSIONS | tr '\n' ' '), all
+
+Examples:
+  test/build ubuntu-noble 2.7.8    # Test Ruby 2.7.8 on Ubuntu Noble
+  test/build arch all              # Test all versions on Arch
+  test/build all 2.7.8             # Test Ruby 2.7.8 on all platforms
+  test/build all                   # Test everything
+EOF
+  exit 1
+}
+
+# Detect native platform
+NATIVE_PLATFORM="linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+
+platform_for() {
+  case $1 in
+    arch) echo "linux/amd64" ;;
+    *)    echo "$NATIVE_PLATFORM" ;;
+  esac
+}
+
+build_image() {
+  local platform=$1
+  local dockerfile="test/${platform}.dockerfile"
+  local image="ruby-build-test:${platform}"
+  local target_platform=$(platform_for "$platform")
+
+  local build_args=(-f "$dockerfile" -t "$image" --load .)
+
+  if [[ -n "$target_platform" ]]; then
+    build_args=(--platform "$target_platform" "${build_args[@]}")
+  fi
+
+  if [[ -n "$BUILDER" ]]; then
+    build_args=(--builder "$BUILDER" "${build_args[@]}")
+    echo "Building $platform image (via $BUILDER)..."
+  else
+    echo "Building $platform image..."
+  fi
+
+  if ! docker buildx build "${build_args[@]}" >/dev/null 2>&1; then
+    echo "  ✗ Image build failed for $platform"
+    exit 1
+  fi
+
+  # Verify we got the right architecture
+  if [[ -n "$target_platform" ]]; then
+    actual=$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)
+    if [[ "$actual" != "$target_platform" ]]; then
+      echo "  ✗ Expected $target_platform but got $actual - multiarch builder not working?"
+      exit 1
+    fi
+  fi
+}
+
+test_ruby() {
+  local platform=$1
+  local version=$2
+  local image="ruby-build-test:${platform}"
+  local target_platform=$(platform_for "$platform")
+  local platform_flag=""
+
+  [[ -n "$target_platform" ]] && platform_flag="--platform $target_platform"
+
+  printf "  %-14s %-14s " "$platform" "$version"
+
+  if output=$(docker run --rm $platform_flag "$image" bash -c \
+    "ruby-build $version /opt/ruby && /opt/ruby/bin/ruby --version" 2>&1); then
+    ruby_version=$(echo "$output" | grep -o 'ruby [0-9].*\]' | tail -1)
+    echo "✓  $ruby_version"
+    return 0
+  else
+    echo "✗  FAILED"
+    return 1
+  fi
+}
+
+[[ $# -lt 1 ]] && usage
+
+platform=${1:-}
+version=${2:-all}
+
+[[ $platform == "all" ]] && platforms="$PLATFORMS" || platforms="$platform"
+[[ $version == "all" ]] && versions="$VERSIONS" || versions="$version"
+
+# Validate platform
+for p in $platforms; do
+  [[ ! -f "test/${p}.dockerfile" ]] && { echo "Unknown platform: $p"; exit 1; }
+done
+
+# Validate version
+for v in $versions; do
+  [[ ! -f "$v" ]] && { echo "Unknown version: $v"; exit 1; }
+done
+
+# Build images
+for p in $platforms; do
+  build_image "$p"
+done
+
+# Run tests
+echo ""
+failed=0
+for p in $platforms; do
+  for v in $versions; do
+    test_ruby "$p" "$v" || ((failed++)) || true
+  done
+done
+
+echo ""
+[[ $failed -eq 0 ]] && echo "All tests passed." || echo "$failed test(s) failed."
+exit $failed
