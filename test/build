@@ -72,6 +72,15 @@ build_image() {
   fi
 }
 
+# Default post-flight checks - can be overridden via test/verify/<version>
+default_verify_script() {
+  cat <<'VERIFY'
+/opt/ruby/bin/ruby -e 'require "openssl"; puts "openssl: #{OpenSSL::OPENSSL_VERSION}"'
+/opt/ruby/bin/ruby -e 'require "digest/sha2"; puts "digest: ok"'
+/opt/ruby/bin/ruby -e 'require "zlib"; puts "zlib: ok"'
+VERIFY
+}
+
 test_ruby() {
   local platform=$1
   local version=$2
@@ -83,13 +92,29 @@ test_ruby() {
 
   printf "  %-14s %-14s " "$platform" "$version"
 
-  if output=$(docker run --rm $platform_flag "$image" bash -c \
-    "ruby-build $version /opt/ruby && /opt/ruby/bin/ruby --version" 2>&1); then
+  # Use version-specific verify script if it exists, otherwise use defaults
+  local verify_script
+  if [[ -f "test/verify/$version" ]]; then
+    verify_script=$(cat "test/verify/$version")
+  else
+    verify_script=$(default_verify_script)
+  fi
+
+  # Build Ruby and run post-flight checks
+  local build_script="
+    set -e
+    ruby-build $version /opt/ruby
+    /opt/ruby/bin/ruby --version
+    $verify_script
+  "
+
+  if output=$(docker run --rm $platform_flag "$image" bash -c "$build_script" 2>&1); then
     ruby_version=$(echo "$output" | grep -o 'ruby [0-9].*\]' | tail -1)
     echo "✓  $ruby_version"
     return 0
   else
     echo "✗  FAILED"
+    echo "$output" | tail -20
     return 1
   fi
 }
