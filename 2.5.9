@@ -22,6 +22,9 @@ case "$(cc -v 2>&1)" in
 esac
 export RUBY_CFLAGS
 
+# Disable BASERUBY to avoid erb dependency issues on Arch Linux
+# (system Ruby 3.4+ doesn't include erb bundled gem, which breaks bootstrap)
+package_option ruby configure --with-baseruby=no
 package_option ruby configure --with-out-ext=tcl --with-out-ext=tk --disable-install-doc
 
 install_package "openssl-1.1.1w" "https://www.openssl.org/source/openssl-1.1.1w.tar.gz#cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8" openssl
