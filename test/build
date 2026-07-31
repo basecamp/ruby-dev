@@ -9,7 +9,7 @@ VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -rV)
 # Builds run concurrently. JOBS caps how many containers are in flight; MAKE_JOBS caps
 # make parallelism inside each one. The product is what actually hits the CPU, so the
 # defaults aim for a mild oversubscribe rather than JOBS x nproc meltdown.
-CORES=$(nproc 2>/dev/null || echo 4)
+CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 JOBS=${JOBS:-$(( CORES / 4 ))}
 (( JOBS < 1 )) && JOBS=1
 (( JOBS > 12 )) && JOBS=12
@@ -177,9 +177,12 @@ echo ""
 
 for p in $platforms; do
   for v in $versions; do
-    # Throttle: wait for a slot before launching the next build.
+    # Throttle: wait for a slot before launching the next build. `wait -n` would be
+    # tidier but needs Bash 4.3, and macOS still ships 3.2 as /bin/bash — there it
+    # fails instantly and spins the loop on a core. Poll instead; builds run for
+    # minutes, so a second of latency costs nothing.
     while (( $(jobs -rp | wc -l) >= JOBS )); do
-      wait -n 2>/dev/null || true
+      sleep 1
     done
     test_ruby "$p" "$v" &
   done
