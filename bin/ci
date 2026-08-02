@@ -27,6 +27,12 @@ ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
 
 failures=()
 
+# A URL ends at whitespace, a quote, or a shell metacharacter — so `"url"`, `'url'`, a bare
+# `url;` and `$(... url)` all yield the same string. Built here rather than inline because
+# embedding a single quote inside a single-quoted grep pattern is unreadable.
+SQ="'"
+URL_RE="https?://[^[:space:];)(&|<>\`\"$SQ]+"
+
 echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
 
 heading() { printf '\n%s%s%s\n' "$TITLE" "$1" "$RESET"; [ $# -gt 1 ] && printf '%s%s%s\n' "$SUBTITLE" "$2" "$RESET"; return 0; }
@@ -82,33 +88,43 @@ join_continuations() {
   return 0
 }
 
-# ruby-build only verifies a download when the URL carries a #checksum. Without
-# one it fetches and builds whatever it got, silently. A missing checksum is the
-# kind of thing that survives review, so assert it here.
+# ruby-build only verifies a download when the URL carries a #checksum. Without one it
+# fetches and builds whatever it got, silently. A missing checksum is the kind of thing
+# that survives review, so assert it here.
+#
+# This checks EVERY url in the file, not just the ones on lines that look like an
+# install_package call. That inversion is the whole point. Matching invocations means
+# matching shell syntax, and shell has unboundedly many ways to spell the same call —
+# quoted, unquoted, line-continued, after `then` or `;` or `&&`, inside a function. Every
+# form the pattern doesn't know is a URL that goes uninspected, and the failure is silent:
+# it reports success having looked at nothing. Review found four such forms in a row here,
+# each time because the fix addressed the shape rather than the class.
+#
+# Checking every URL fails closed instead. A download in a syntax nobody anticipated gets
+# flagged rather than skipped, and the only way to exempt one is to say so explicitly
+# below — which is the right friction, since an unverified download is exactly what this
+# check exists to prevent.
 lint_checksums() {
-  heading "Checksums" "every install_package URL carries a #sha256"
+  heading "Checksums" "every download URL carries a #sha256"
   local f url ok found
   for f in $(definitions); do
     ok=true
     found=0
-    # Match the URL itself and let whitespace or either quote end it, rather than
-    # enumerating quote styles. `install_package "x" "url"`, `'url'` and a bare `url` are
-    # all valid shell, and a pattern that requires quotes silently extracts nothing from
-    # the form it doesn't know — passing a definition with no digest at all rather than
-    # complaining. Matching the thing itself has no such blind spot.
-    #
-    # Still scoped to install_package lines, and that scoping is load-bearing: applied to
-    # the whole file this would flag 1.8.7's `curl '<savannah url>'` calls, which fetch
-    # config.guess and legitimately carry no checksum.
     while IFS= read -r url; do
+      case "$url" in
+        # The sole exemption. config.guess/config.sub are fetched from GNU's git web view,
+        # which serves a moving HEAD with no release tarball and no published digest. They
+        # only teach ancient configure scripts about modern architectures and are never
+        # linked into the built Ruby. Anything else must carry a digest.
+        https://git.savannah.gnu.org/*) continue ;;
+      esac
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
-    done < <(join_continuations "$f" | grep -E '^[[:space:]]*install_package' \
-               | grep -oE "https?://[^[:space:]\"']+")
-    # Every definition installs at least Ruby itself from a URL. Finding none means the
-    # extractor stopped matching, not that the file is clean — don't call that a pass.
+    done < <(join_continuations "$f" | grep -v '^[[:space:]]*#' | grep -oE "$URL_RE")
+    # Every definition downloads at least Ruby itself. Finding nothing means the extractor
+    # stopped matching, not that the file is clean — don't call that a pass.
     if [ "$found" -eq 0 ]; then
-      fail "$f: no install_package URLs found — checksum lint could not inspect this file"
+      fail "$f: no download URLs found — checksum lint could not inspect this file"
       ok=false
     fi
     # Explicit if, not `$ok && pass`: that leaves the loop's exit status at 1 when
