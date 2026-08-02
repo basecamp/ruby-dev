@@ -4,15 +4,31 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PLATFORMS="ubuntu-noble arch"
-VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -rV)
+
+# macOS ships BSD sort, which rejects -V. Fall back to plain sort there rather than dying
+# on an unsupported flag — the order is cosmetic, it only sets which builds start first.
+if printf '1\n' | sort -V >/dev/null 2>&1; then
+  VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -rV)
+else
+  VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -r)
+fi
+[ -n "$VERSIONS" ] || { echo "error: no definition files found in $PWD" >&2; exit 1; }
 
 # Builds run concurrently. JOBS caps how many containers are in flight; MAKE_JOBS caps
-# make parallelism inside each one. The product is what actually hits the CPU, so the
-# defaults aim for a mild oversubscribe rather than JOBS x nproc meltdown.
+# make parallelism inside each one.
+#
+# JOBS is deliberately generous relative to core count. Measuring a real run, each
+# container averages ~1.0 core, not the MAKE_JOBS it's allowed: these old Ruby builds
+# spend most of their wall time single-threaded — miniruby bootstrapping and generating
+# exts.mk, the dependency-serialized tail of make, `gem install bundler` — with only brief
+# bursts of parallel compilation. 1.9.3 is stricter still, forcing make -j1 in its own
+# definition to dodge a parallel-make race. Budgeting MAKE_JOBS cores per container left
+# the machine ~75% idle, and the long pole (1.9.3, ~190s vs ~110s for the rest) could sit
+# queued behind short builds instead of starting immediately.
 CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-JOBS=${JOBS:-$(( CORES / 4 ))}
+JOBS=${JOBS:-$(( CORES / 2 ))}
 (( JOBS < 1 )) && JOBS=1
-(( JOBS > 12 )) && JOBS=12
+(( JOBS > 16 )) && JOBS=16
 MAKE_JOBS=${MAKE_JOBS:-4}
 
 # Use multi-platform builder if available (faster cross-arch builds)

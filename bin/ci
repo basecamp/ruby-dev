@@ -33,7 +33,21 @@ heading() { printf '\n%s%s%s\n' "$TITLE" "$1" "$RESET"; [ $# -gt 1 ] && printf '
 pass()    { printf '%s  ✓ %s%s\n' "$SUCCESS" "$1" "$RESET"; }
 fail()    { printf '%s  ✗ %s%s\n' "$ERROR" "$1" "$RESET"; failures+=("$1"); }
 
-definitions() { ls -1 [0-9]* 2>/dev/null | sort -V; }
+# Plain `sort`, not `sort -V`: macOS ships BSD sort, which rejects -V. That failure would
+# not trip set -e here (it's a command substitution inside a `for` list), so the list would
+# come back empty and every check below would silently pass over nothing — a green run that
+# linted zero definitions. Ordering is cosmetic for linting, so portability wins.
+definitions() { ls -1 [0-9]* 2>/dev/null | sort; }
+
+# And belt-and-braces: whatever the cause — wrong directory, failed glob, broken sort — an
+# empty list must be a hard error, never a quiet pass.
+require_definitions() {
+  if [ -z "$(definitions)" ]; then
+    printf '%serror: no definition files found in %s — refusing to report success%s\n' \
+      "$ERROR" "$PWD" "$RESET" >&2
+    exit 1
+  fi
+}
 
 # --- Shell syntax -----------------------------------------------------------
 # Definitions are sourced by ruby-build, so a syntax error in one is a build
@@ -52,12 +66,28 @@ lint_syntax() {
 # kind of thing that survives review, so assert it here.
 lint_checksums() {
   heading "Checksums" "every install_package URL carries a #sha256"
-  local f url ok
+  local f url ok found
   for f in $(definitions); do
     ok=true
+    found=0
+    # Scoped to install_package lines, and accepting either quote style.
+    #
+    # Both halves matter. Matching only double quotes would silently pass a definition
+    # written with single quotes — valid shell, and the check would extract nothing rather
+    # than complain. But widening to single quotes without scoping to install_package would
+    # start flagging 1.8.7's `curl '<savannah url>'` calls, which fetch config.guess and
+    # legitimately have no checksum to carry.
     while IFS= read -r url; do
+      found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
-    done < <(grep -oE '"https?://[^"]+"' "$f" | tr -d '"')
+    done < <(grep -E '^[[:space:]]*install_package' "$f" \
+               | grep -oE "[\"']https?://[^\"']+[\"']" | tr -d "\"'")
+    # Every definition installs at least Ruby itself from a URL. Finding none means the
+    # extractor stopped matching, not that the file is clean — don't call that a pass.
+    if [ "$found" -eq 0 ]; then
+      fail "$f: no install_package URLs found — checksum lint could not inspect this file"
+      ok=false
+    fi
     # Explicit if, not `$ok && pass`: that leaves the loop's exit status at 1 when
     # the *last* definition fails, and set -e then kills the run before the later
     # checks and the summary — failures reported, no verdict.
@@ -113,6 +143,7 @@ signoff() {
 
 started=$SECONDS
 
+require_definitions
 lint_syntax
 lint_checksums
 lint_shellcheck
