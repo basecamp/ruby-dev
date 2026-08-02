@@ -17,6 +17,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Before anything else, so --help doesn't sit through a lint pass first.
+case "${1:-}" in
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+esac
+
 BANNER=$'\033[1;32m'; TITLE=$'\033[1;35m'; SUBTITLE=$'\033[1;90m'
 ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
 
