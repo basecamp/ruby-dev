@@ -61,6 +61,27 @@ lint_syntax() {
 }
 
 # --- Checksums --------------------------------------------------------------
+# Fold backslash-continued lines into one, so an install_package spelled across several
+# lines is inspected whole. Matching raw lines would see only the first, and a missing
+# checksum on a continuation would pass unnoticed — with another well-formed call in the
+# file, even the "found nothing" guard below wouldn't fire.
+#
+# Pure bash rather than sed/awk: the usual line-joining one-liners differ between BSD and
+# GNU, and macOS portability is the entire point of this section.
+join_continuations() {
+  local line acc=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "${line%\\}" != "$line" ]; then
+      acc="${acc}${line%\\} "
+    else
+      printf '%s%s\n' "$acc" "$line"
+      acc=""
+    fi
+  done < "$1"
+  [ -n "$acc" ] && printf '%s\n' "$acc"
+  return 0
+}
+
 # ruby-build only verifies a download when the URL carries a #checksum. Without
 # one it fetches and builds whatever it got, silently. A missing checksum is the
 # kind of thing that survives review, so assert it here.
@@ -80,7 +101,7 @@ lint_checksums() {
     while IFS= read -r url; do
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
-    done < <(grep -E '^[[:space:]]*install_package' "$f" \
+    done < <(join_continuations "$f" | grep -E '^[[:space:]]*install_package' \
                | grep -oE "[\"']https?://[^\"']+[\"']" | tr -d "\"'")
     # Every definition installs at least Ruby itself from a URL. Finding none means the
     # extractor stopped matching, not that the file is clean — don't call that a pass.
