@@ -58,7 +58,8 @@ build_image() {
   local platform=$1
   local dockerfile="test/${platform}.dockerfile"
   local image="ruby-build-test:${platform}"
-  local target_platform=$(platform_for "$platform")
+  local target_platform
+  target_platform=$(platform_for "$platform")
 
   local build_args=(-f "$dockerfile" -t "$image" --load .)
 
@@ -109,7 +110,8 @@ test_ruby() {
   local platform=$1
   local version=$2
   local image="ruby-build-test:${platform}"
-  local target_platform=$(platform_for "$platform")
+  local target_platform
+  target_platform=$(platform_for "$platform")
   local platform_flag=""
 
   [[ -n "$target_platform" ]] && platform_flag="--platform $target_platform"
@@ -140,6 +142,11 @@ test_ruby() {
   "
 
   local started=$SECONDS output elapsed
+  # $platform_flag is deliberately unquoted: it holds two words ("--platform
+  # linux/amd64") and must split into two arguments. An array would be the tidier
+  # idiom, but expanding an empty one under `set -u` is an error on macOS's Bash
+  # 3.2, and this script has to keep working there.
+  # shellcheck disable=SC2086
   if output=$(docker run --rm $platform_flag -e MAKE_OPTS="-j${MAKE_JOBS}" \
                 "$image" bash -c "$build_script" 2>&1); then
     elapsed=$(( SECONDS - started ))

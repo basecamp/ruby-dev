@@ -153,10 +153,37 @@ Whichever tool you use, the definitions are only found if ruby-build can actuall
 If a build fails in a way that looks nothing like the notes in this repo, check that the
 definition was actually picked up before debugging the compiler error.
 
+### CI
+
+There's no cloud CI here. Run `bin/ci` before merging, and it signs off the commit for you
+on success:
+
+```bash
+bin/ci              # lint + the full build matrix, then gh signoff
+bin/ci --lint       # lint only, no Docker — seconds, good for a quick check
+bin/ci arch         # lint + Arch only
+bin/ci arch 2.7.8   # lint + a single build
+```
+
+Only a full run signs off. Anything narrower reports its results and explicitly declines to
+sign, because a green tick that covered one platform is worse than no tick.
+
+The lint pass is cheap and catches the two mistakes that otherwise surface ten minutes into
+a Docker build: a syntax error in a definition (ruby-build sources these, so a stray quote
+is a build failure), and an `install_package` URL with no `#sha256` (ruby-build silently
+skips verification when the checksum is missing).
+
+Sign-off needs the extension:
+
+```bash
+gh extension install basecamp/gh-signoff
+```
+
 ### Testing
 
 `test/build` builds definitions in throwaway Docker containers, so a clean-machine build
-is checked without touching your own toolchain.
+is checked without touching your own toolchain. `bin/ci` runs it for you; use it directly
+when you want a specific slice.
 
 ```bash
 test/build arch 1.8.7-p374     # one version on one platform
