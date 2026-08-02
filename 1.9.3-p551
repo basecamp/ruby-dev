@@ -19,7 +19,15 @@ install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler -v 1.17.3
 }
 
-RUBY_CFLAGS=""
+# -O3 because leaving this empty does not mean "use configure's default". ruby-build
+# exports it as CFLAGS, which supersedes configure's own optflags, so an empty value builds
+# at -O0 — measured 2-3x slower than the same source at -O3.
+#
+# -fno-strict-overflow guards the fixnum overflow checks in these old sources, which assume
+# signed overflow wraps — undefined behaviour that GCC exploits from -O2 up. On 1.8.7 its
+# absence silently makes 2**64 evaluate to 0. Kept uniform across every definition here;
+# it costs nothing measurable.
+RUBY_CFLAGS="-O3 -fno-strict-overflow"
 case "$(cc -v 2>&1)" in
   *gcc*)
     RUBY_CFLAGS+=" -Wno-discarded-qualifiers"
@@ -28,6 +36,16 @@ case "$(cc -v 2>&1)" in
     RUBY_CFLAGS+=" -Wno-return-type"
     # GCC 15 porting: Use -std=gnu99 with relaxed type checking
     RUBY_CFLAGS+=" -std=gnu99 -Wno-error=implicit-function-declaration"
+    # Cap _FORTIFY_SOURCE at 2. Ubuntu's GCC defines it to 3 automatically whenever
+    # optimization is on, and level 3's more aggressive object-size inference trips on
+    # 1.9.3: the build aborts with "*** buffer overflow detected ***" while running the
+    # freshly built miniruby to generate exts.mk. Level 2 builds and runs clean.
+    #
+    # This is not a loss of hardening relative to before. _FORTIFY_SOURCE does nothing
+    # without optimization, so while this definition was (unintentionally) building at
+    # -O0, no fortification was happening at all. Only 1.9.3 needs the cap; the other
+    # definitions build fine at level 3.
+    RUBY_CFLAGS+=" -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2"
     ;;
   *clang*)
     RUBY_CFLAGS+=" -Wno-compound-token-split-by-macro"

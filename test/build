@@ -89,11 +89,19 @@ build_image() {
 }
 
 # Default post-flight checks - can be overridden via test/verify/<version>
+#
+# The arithmetic check is not paranoia. These sources predate the compilers building them
+# and their fixnum overflow checks assume signed overflow wraps, which is undefined
+# behaviour GCC exploits from -O2 up. A 1.8.7 built -O3 without -fno-strict-overflow
+# compiles cleanly, runs, loads every library below — and evaluates 2**64 to 0. Nothing
+# above this line would notice, so any change to optimization flags could ship silent wrong
+# arithmetic. Kept 1.8.7-compatible: no interpolation-free heredocs, no modern syntax.
 default_verify_script() {
   cat <<'VERIFY'
 /opt/ruby/bin/ruby -e 'require "openssl"; puts "openssl: #{OpenSSL::OPENSSL_VERSION}"'
 /opt/ruby/bin/ruby -e 'require "digest/sha2"; puts "digest: ok"'
 /opt/ruby/bin/ruby -e 'require "zlib"; puts "zlib: ok"'
+/opt/ruby/bin/ruby -e 'raise "2**64 wrong: #{2**64}" unless (2**64).to_s == "18446744073709551616"; raise "2**100 wrong" unless (2**100).to_s == "1267650600228229401496703205376"; raise "mul overflow wrong" unless (4611686018427387903 * 2).to_s == "9223372036854775806"; raise "negative overflow wrong" unless (-2**64).to_s == "-18446744073709551616"; raise "10**20 wrong" unless (10**20).to_s == "100000000000000000000"; puts "arithmetic: ok"'
 VERIFY
 }
 
@@ -114,10 +122,19 @@ test_ruby() {
     verify_script=$(default_verify_script)
   fi
 
-  # Build Ruby and run post-flight checks
+  # Build Ruby and run post-flight checks.
+  #
+  # On failure, dump ruby-build's own log before exiting. Several definitions send the
+  # compiler output there (>&4) rather than to stdout, and the container is --rm, so
+  # without this the log dies with it and all you get is "BUILD FAILED" over a screen of
+  # curl progress bars.
   local build_script="
     set -e
-    ruby-build $version /opt/ruby
+    ruby-build $version /opt/ruby || {
+      echo '--- ruby-build log (tail) ---'
+      tail -60 /tmp/ruby-build.*.log 2>/dev/null
+      exit 1
+    }
     /opt/ruby/bin/ruby --version
     $verify_script
   "
@@ -135,8 +152,12 @@ test_ruby() {
     printf '  %-14s %-14s ✗  %-62s %4ds\n' "$platform" "$version" "FAILED" "$elapsed"
     echo "fail" > "$RESULTS/$platform.$version.status"
     # Keep the log for the end-of-run report rather than interleaving it with
-    # other jobs' output as it happens.
-    echo "$output" | tail -30 > "$RESULTS/$platform.$version.log"
+    # other jobs' output as it happens. Strip curl's progress meter first — it's
+    # carriage-return spam that otherwise fills the tail and buries the actual error.
+    echo "$output" \
+      | grep -vE '^ *[0-9 ]+ +[0-9]+ +[0-9]+[0-9k. ]*(--:--:--|[0-9]+:[0-9]+:[0-9]+)' \
+      | grep -vE '^ *% Total|^ *Dload' \
+      | tail -50 > "$RESULTS/$platform.$version.log"
   fi
   return 0
 }
