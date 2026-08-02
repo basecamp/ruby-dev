@@ -27,11 +27,30 @@ ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
 
 failures=()
 
-# A URL ends at whitespace, a quote, or a shell metacharacter — so `"url"`, `'url'`, a bare
-# `url;` and `$(... url)` all yield the same string. Built here rather than inline because
-# embedding a single quote inside a single-quoted grep pattern is unreadable.
+# A URL ends at whitespace or a quote. Shell metacharacters are deliberately allowed
+# *inside* the match and trimmed from the end afterwards (see trim_url): excluding them
+# outright truncates legitimate URLs that contain them, and the savannah gitweb links are
+# exactly that — `?p=config.git;a=blob_plain;f=config.guess;hb=HEAD` would be cut at the
+# first semicolon, discarding the part that says which file it fetches.
+#
+# Built here rather than inline because embedding a single quote inside a single-quoted
+# grep pattern is unreadable.
 SQ="'"
-URL_RE="https?://[^[:space:];)(&|<>\`\"$SQ]+"
+URL_RE="https?://[^[:space:]\"$SQ\`]+"
+
+# Strip trailing shell punctuation left over from an unquoted URL (`…tar.gz; fi`,
+# `…tar.gz && echo`). Safe because none of these can legitimately end a URL, unlike the
+# semicolons that appear mid-query-string above.
+trim_url() {
+  local u="$1"
+  while :; do
+    case "$u" in
+      *[\;\)\(\&\|\<\>]) u="${u%?}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$u"
+}
 
 echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
 
@@ -111,12 +130,18 @@ lint_checksums() {
     ok=true
     found=0
     while IFS= read -r url; do
+      url=$(trim_url "$url")
       case "$url" in
-        # The sole exemption. config.guess/config.sub are fetched from GNU's git web view,
-        # which serves a moving HEAD with no release tarball and no published digest. They
-        # only teach ancient configure scripts about modern architectures and are never
-        # linked into the built Ruby. Anything else must carry a digest.
-        https://git.savannah.gnu.org/*) continue ;;
+        # The sole exemption, and deliberately spelled out to the exact file rather than
+        # by domain: config.guess and config.sub come from GNU's git web view, which serves
+        # a moving HEAD with no release tarball and no published digest. They only teach
+        # ancient configure scripts about modern architectures and are never linked into
+        # the built Ruby.
+        #
+        # A domain wildcard here would quietly exempt any other unverified download from
+        # the same host — re-opening the false-green path this check exists to close.
+        *git.savannah.gnu.org/gitweb/?p=config.git*f=config.guess*|\
+        *git.savannah.gnu.org/gitweb/?p=config.git*f=config.sub*) continue ;;
       esac
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
