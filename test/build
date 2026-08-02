@@ -6,6 +6,15 @@ cd "$(dirname "$0")/.."
 PLATFORMS="ubuntu-noble arch"
 VERSIONS=$(ls -1 [0-9]* 2>/dev/null | sort -rV)
 
+# Builds run concurrently. JOBS caps how many containers are in flight; MAKE_JOBS caps
+# make parallelism inside each one. The product is what actually hits the CPU, so the
+# defaults aim for a mild oversubscribe rather than JOBS x nproc meltdown.
+CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+JOBS=${JOBS:-$(( CORES / 4 ))}
+(( JOBS < 1 )) && JOBS=1
+(( JOBS > 12 )) && JOBS=12
+MAKE_JOBS=${MAKE_JOBS:-4}
+
 # Use multi-platform builder if available (faster cross-arch builds)
 BUILDER=""
 if docker buildx ls 2>/dev/null | grep -A2 "^multiarch" | grep -q "running"; then
@@ -24,6 +33,13 @@ Examples:
   test/build arch all              # Test all versions on Arch
   test/build all 2.7.8             # Test Ruby 2.7.8 on all platforms
   test/build all                   # Test everything
+
+Environment:
+  JOBS=$JOBS         Containers built concurrently
+  MAKE_JOBS=$MAKE_JOBS      make -j inside each container
+
+Results stream in as builds finish, so they arrive out of order. A sorted
+summary is printed at the end.
 EOF
   exit 1
 }
@@ -90,8 +106,6 @@ test_ruby() {
 
   [[ -n "$target_platform" ]] && platform_flag="--platform $target_platform"
 
-  printf "  %-14s %-14s " "$platform" "$version"
-
   # Use version-specific verify script if it exists, otherwise use defaults
   local verify_script
   if [[ -f "test/verify/$version" ]]; then
@@ -108,15 +122,23 @@ test_ruby() {
     $verify_script
   "
 
-  if output=$(docker run --rm $platform_flag "$image" bash -c "$build_script" 2>&1); then
+  local started=$SECONDS output elapsed
+  if output=$(docker run --rm $platform_flag -e MAKE_OPTS="-j${MAKE_JOBS}" \
+                "$image" bash -c "$build_script" 2>&1); then
+    elapsed=$(( SECONDS - started ))
     ruby_version=$(echo "$output" | grep -o 'ruby [0-9].*\]' | tail -1)
-    echo "✓  $ruby_version"
-    return 0
+    # One printf so concurrent jobs can't interleave mid-line.
+    printf '  %-14s %-14s ✓  %-62s %4ds\n' "$platform" "$version" "$ruby_version" "$elapsed"
+    echo "pass" > "$RESULTS/$platform.$version.status"
   else
-    echo "✗  FAILED"
-    echo "$output" | tail -20
-    return 1
+    elapsed=$(( SECONDS - started ))
+    printf '  %-14s %-14s ✗  %-62s %4ds\n' "$platform" "$version" "FAILED" "$elapsed"
+    echo "fail" > "$RESULTS/$platform.$version.status"
+    # Keep the log for the end-of-run report rather than interleaving it with
+    # other jobs' output as it happens.
+    echo "$output" | tail -30 > "$RESULTS/$platform.$version.log"
   fi
+  return 0
 }
 
 [[ $# -lt 1 ]] && usage
@@ -142,15 +164,44 @@ for p in $platforms; do
   build_image "$p"
 done
 
-# Run tests
+# Run tests, up to $JOBS at a time
+RESULTS=$(mktemp -d)
+trap 'rm -rf "$RESULTS"' EXIT
+
+total=0
+for p in $platforms; do for v in $versions; do total=$(( total + 1 )); done; done
+
 echo ""
+echo "Running $total build(s), $JOBS at a time (make -j$MAKE_JOBS each)..."
+echo ""
+
+for p in $platforms; do
+  for v in $versions; do
+    # Throttle: wait for a slot before launching the next build. `wait -n` would be
+    # tidier but needs Bash 4.3, and macOS still ships 3.2 as /bin/bash — there it
+    # fails instantly and spins the loop on a core. Poll instead; builds run for
+    # minutes, so a second of latency costs nothing.
+    while (( $(jobs -rp | wc -l) >= JOBS )); do
+      sleep 1
+    done
+    test_ruby "$p" "$v" &
+  done
+done
+wait
+
+# Summarize in stable order, since results streamed in as they finished.
 failed=0
 for p in $platforms; do
   for v in $versions; do
-    test_ruby "$p" "$v" || ((failed++)) || true
+    if [[ $(cat "$RESULTS/$p.$v.status" 2>/dev/null) != "pass" ]]; then
+      failed=$(( failed + 1 ))
+      echo ""
+      echo "=== $p $v failed ==="
+      cat "$RESULTS/$p.$v.log" 2>/dev/null || echo "(no output captured)"
+    fi
   done
 done
 
 echo ""
-[[ $failed -eq 0 ]] && echo "All tests passed." || echo "$failed test(s) failed."
+[[ $failed -eq 0 ]] && echo "All $total tests passed." || echo "$failed of $total test(s) failed."
 exit $failed
