@@ -91,18 +91,20 @@ lint_checksums() {
   for f in $(definitions); do
     ok=true
     found=0
-    # Scoped to install_package lines, and accepting either quote style.
+    # Match the URL itself and let whitespace or either quote end it, rather than
+    # enumerating quote styles. `install_package "x" "url"`, `'url'` and a bare `url` are
+    # all valid shell, and a pattern that requires quotes silently extracts nothing from
+    # the form it doesn't know — passing a definition with no digest at all rather than
+    # complaining. Matching the thing itself has no such blind spot.
     #
-    # Both halves matter. Matching only double quotes would silently pass a definition
-    # written with single quotes — valid shell, and the check would extract nothing rather
-    # than complain. But widening to single quotes without scoping to install_package would
-    # start flagging 1.8.7's `curl '<savannah url>'` calls, which fetch config.guess and
-    # legitimately have no checksum to carry.
+    # Still scoped to install_package lines, and that scoping is load-bearing: applied to
+    # the whole file this would flag 1.8.7's `curl '<savannah url>'` calls, which fetch
+    # config.guess and legitimately carry no checksum.
     while IFS= read -r url; do
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
     done < <(join_continuations "$f" | grep -E '^[[:space:]]*install_package' \
-               | grep -oE "[\"']https?://[^\"']+[\"']" | tr -d "\"'")
+               | grep -oE "https?://[^[:space:]\"']+")
     # Every definition installs at least Ruby itself from a URL. Finding none means the
     # extractor stopped matching, not that the file is clean — don't call that a pass.
     if [ "$found" -eq 0 ]; then
