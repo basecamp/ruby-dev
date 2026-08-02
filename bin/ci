@@ -132,16 +132,20 @@ lint_checksums() {
     while IFS= read -r url; do
       url=$(trim_url "$url")
       case "$url" in
-        # The sole exemption, and deliberately spelled out to the exact file rather than
-        # by domain: config.guess and config.sub come from GNU's git web view, which serves
-        # a moving HEAD with no release tarball and no published digest. They only teach
-        # ancient configure scripts about modern architectures and are never linked into
-        # the built Ruby.
+        # The only exempt downloads, matched as exact literals. config.guess and config.sub
+        # come from GNU's git web view, which serves a moving HEAD with no release tarball
+        # and no published digest. They only teach ancient configure scripts about modern
+        # architectures and are never linked into the built Ruby.
         #
-        # A domain wildcard here would quietly exempt any other unverified download from
-        # the same host — re-opening the false-green path this check exists to close.
-        *git.savannah.gnu.org/gitweb/?p=config.git*f=config.guess*|\
-        *git.savannah.gnu.org/gitweb/?p=config.git*f=config.sub*) continue ;;
+        # Literals, not patterns, because every wildcard here is a hole: a domain glob
+        # exempts anything from the host, and `*f=config.guess*` also exempts
+        # `f=config.guess.anything`. Both were tried, both were wrong. Quoted so `?` and
+        # `;` are matched literally rather than as glob and case-clause syntax.
+        #
+        # If these URLs ever change shape, this list must be updated by hand — that is the
+        # intended cost of skipping verification on a download.
+        "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"|\
+        "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD") continue ;;
       esac
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
