@@ -77,8 +77,16 @@ comment_index() {
   # the silent direction, dropping a real download from the line and passing it
   # unverified. No definition here uses these forms, so the cost is theoretical and
   # the safety is not.
+  # Once a construct we can't track appears, quote state is unknowable from here on — the
+  # line may open or close quotes in ways this scan would misread. Rather than carry a
+  # possibly-desynced state forward (which silently drops real downloads on later lines),
+  # latch into "don't strip anything else in this file". That can only over-report: URLs in
+  # comments get flagged, loudly, instead of real ones being dropped, quietly.
+  if [ "${Q_UNKNOWN:-0}" = 1 ]; then
+    return 0
+  fi
   case "$line" in
-    *\$\'*|*\$\"*) return 0 ;;
+    *\$\'*|*\$\"*) Q_UNKNOWN=1; return 0 ;;
   esac
   while [ "$i" -lt "$n" ]; do
     c="${line:$i:1}"
@@ -117,6 +125,7 @@ strip_comments() {
   # Restarting unquoted on each line made a `#` inside such a string look like a comment
   # and truncated the rest of the line — taking any real download on it along too.
   local line insq=0 indq=0
+  Q_UNKNOWN=0   # reset per file, not per line: the latch is file-scoped
   while IFS= read -r line || [ -n "$line" ]; do
     comment_index "$line" "$insq" "$indq"
     insq=$Q_SQ
