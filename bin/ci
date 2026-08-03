@@ -27,11 +27,10 @@ ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
 
 failures=()
 
-# A URL ends at whitespace or a quote. Shell metacharacters are deliberately allowed
-# *inside* the match and trimmed from the end afterwards (see trim_url): excluding them
-# outright truncates legitimate URLs that contain them, and the savannah gitweb links are
-# exactly that — `?p=config.git;a=blob_plain;f=config.guess;hb=HEAD` would be cut at the
-# first semicolon, discarding the part that says which file it fetches.
+# A URL runs to the next whitespace or quote. Shell metacharacters are captured here and
+# cut afterwards by trim_url, rather than excluded outright, so that an unquoted URL with
+# a command attached (`…tar.gz;echo`) is seen whole before being trimmed — grep alone
+# can't tell where the URL ends and the next command begins.
 #
 # Built here rather than inline because embedding a single quote inside a single-quoted
 # grep pattern is unreadable.
@@ -129,13 +128,23 @@ join_continuations() {
 # download, which is the honest limitation of matching on shape.
 lint_checksums() {
   heading "Checksums" "every source archive carries a #sha256"
-  local f url base ok found
+  local f raw url base path ok found
   for f in $(definitions); do
     ok=true
     found=0
-    while IFS= read -r url; do
-      url=$(trim_url "$url")
-      base=${url%%#*}
+    while IFS= read -r raw; do
+      # Two questions, deliberately answered from different strings.
+      #
+      # Whether a digest is present is asked of the untrimmed URL, because `&` is both a
+      # shell operator and ordinary query syntax. Trimming first would cut
+      # `…tar.gz?a=1&b=2#<digest>` at the ampersand and report a missing digest that is
+      # right there.
+      #
+      # What kind of URL it is gets asked of the trimmed path, so an attached command
+      # (`…tar.gz;echo`) or a query string (`…tar.gz?download=1`) can't hide the extension.
+      url=$(trim_url "$raw")
+      base=${url%%#*}      # up to the digest — what to report
+      path=${base%%\?*}    # and without the query — what to classify on
       # Only archives are checked, and that is what removes the need to understand the
       # shell around them. install_package fetches release tarballs, so a URL ending in
       # an archive extension is a download; anything else is a reference.
@@ -145,12 +154,14 @@ lint_checksums() {
       # every bug in this check came from. Quoting, continuations, `;#`, ANSI-C strings,
       # heredocs: each one handled, each one exposing the next. Matching on what the URL
       # *is* needs none of it.
-      case "$base" in
+      case "$path" in
         *.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz2|*.tar.Z|*.zip) ;;
         *) continue ;;
       esac
       found=$(( found + 1 ))
-      [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on $base"; ok=false; }
+      # Unanchored, with a boundary, since the digest may be followed by a query
+      # remnant or an attached command rather than ending the string.
+      [[ $raw =~ \#[0-9a-f]{64}([^0-9a-f]|$) ]] || { fail "$f: no sha256 on $base"; ok=false; }
     done < <(join_continuations "$f" | grep -oE "$URL_RE")
     # Every definition fetches at least Ruby itself as a tarball. Finding none means the
     # extractor stopped matching, not that the file is clean — don't call that a pass.
