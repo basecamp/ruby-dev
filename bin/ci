@@ -97,7 +97,12 @@ join_continuations() {
   local line acc=""
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "${line%\\}" != "$line" ]; then
-      acc="${acc}${line%\\} "
+      # Join with nothing, matching shell: a backslash-newline is removed entirely, it
+      # does not become whitespace. Inserting a space would split tokens shell keeps
+      # together — `"https\` + `://host/x"` is one URL to bash but would arrive here as
+      # `https ://host/x` and match nothing, silently skipping that download. Ordinary
+      # continuations already carry their own whitespace around the backslash.
+      acc="${acc}${line%\\}"
     else
       printf '%s%s\n' "$acc" "$line"
       acc=""
