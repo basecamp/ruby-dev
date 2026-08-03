@@ -1,0 +1,316 @@
+#!/bin/bash
+# Regression tests for bin/ci's checksum lint.
+#
+# That lint took nineteen rounds of review to get right, and every round was a definition
+# shape that slipped past it — quoting, continuations, `;#`, ANSI-C strings, heredocs,
+# attached commands, query strings. Each was verified once, by hand, against a scratch file
+# that was then deleted. This file is that corpus, kept.
+#
+# Two directions matter and they are not symmetric. A false negative means an unverified
+# download ships silently, which is what the lint exists to prevent. A false positive
+# blocks CI over a URL nothing fetches, which is what makes people delete the check. Both
+# are tested.
+#
+#   test/lint            # run every case
+#
+# Cases call lint_checksums directly and assert on its `failures` array — the same array
+# bin/ci's summary reads, so a test can't pass on output that wouldn't fail the run.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+
+# bin/ci only runs its dispatch when executed, so sourcing it just defines the lints.
+# shellcheck source=bin/ci
+. bin/ci
+
+# Fixtures live under test/, never in the repo root: a file there matching [0-9]* is a
+# definition to bin/ci's definitions(), to test/build's VERSIONS, and to both dockerfiles'
+# `COPY [0-9]* ./`. A stray fixture would be built for real.
+FIXTURES=$(mktemp -d "${TMPDIR:-/tmp}/ruby-dev-lint.XXXXXX")
+trap 'rm -rf "$FIXTURES"' EXIT
+
+DIGEST=c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0
+
+tests=0
+failed=0
+
+ok() {
+  tests=$(( tests + 1 ))
+  printf '  ✓ %s\n' "$1"
+}
+
+bad() {
+  tests=$(( tests + 1 ))
+  failed=$(( failed + 1 ))
+  printf '  ✗ %s\n' "$1"
+  [ $# -gt 1 ] && [ -n "$2" ] && printf '      %s\n' "$2"
+  return 0
+}
+
+# Joining with a plain expansion of an empty array is an error under `set -u` on macOS's
+# Bash 3.2, and this repo supports it.
+failure_text() {
+  if [ ${#failures[@]} -eq 0 ]; then printf ''; else printf '%s; ' "${failures[@]}"; fi
+}
+
+# Write the fixture on stdin into its own directory and lint it there. Its own directory
+# because definitions() globs $PWD, so cases would otherwise see each other's files.
+lint_fixture() {
+  # Two `local` statements, not one: in `local name=$1 dir="$FIXTURES/$name"`, the second
+  # assignment doesn't see the first — it resolves $name from the caller's scope, which is
+  # the trap bin/ci's own comment_index hit before it was deleted.
+  local name=$1
+  local dir="$FIXTURES/$name"
+  mkdir -p "$dir"
+  cat > "$dir/9.9.9"
+  failures=()
+  cd "$dir"
+  # Redirected, not piped: `failures` is a global the caller inspects, and a pipeline would
+  # append to it in a subshell that then exits.
+  lint_checksums >/dev/null 2>&1
+  cd "$ROOT"
+}
+
+# An archive URL with no digest must be reported, and reported as a missing digest —
+# not as some other failure that happens to be nonzero.
+must_fail() {
+  local name=$1
+  lint_fixture "$name"
+  if [ ${#failures[@]} -eq 0 ]; then
+    bad "$name (not flagged)"
+  else
+    case "$(failure_text)" in
+      *"no sha256 on"*) ok "$name" ;;
+      *) bad "$name (flagged, but not for a missing digest)" "$(failure_text)" ;;
+    esac
+  fi
+}
+
+must_pass() {
+  local name=$1
+  lint_fixture "$name"
+  if [ ${#failures[@]} -eq 0 ]; then ok "$name"; else bad "$name" "$(failure_text)"; fi
+}
+
+# --- Must fail: undigested archives ----------------------------------------
+# Every shell spelling that reached review as a silent pass. Position is no longer what
+# decides — these are here so that stays true.
+
+printf '\nUndigested archives (must be caught)\n'
+
+must_fail 'double-quoted' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz" standard
+DEF
+
+must_fail 'single-quoted' <<DEF
+install_package 'ruby-2.7.8' 'https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz' standard
+DEF
+
+must_fail 'unquoted' <<DEF
+install_package ruby-2.7.8 https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz standard
+DEF
+
+must_fail 'line-continued' <<DEF
+install_package "ruby-2.7.8" \\
+  "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz" \\
+  standard
+DEF
+
+# One URL to bash, two lines on disk. Joining these with a space instead of nothing
+# yielded 'https ://…', which matched no extension and skipped the download.
+must_fail 'split mid-scheme' <<DEF
+install_package "ruby-2.7.8" "https\\
+://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz" standard
+DEF
+
+must_fail 'after if/then' <<DEF
+if [ -n "\$PREFIX_PATH" ]; then install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"; fi
+DEF
+
+must_fail 'after &&' <<DEF
+true && install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+must_fail 'after ;' <<DEF
+true; install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+# $'…' has its own escape rules. A scanner that read the escaped apostrophe as closing the
+# string treated the rest of the file as quoted and dropped this download.
+must_fail 'after ANSI-C quoting' <<DEF
+note=\$'it\\'s a patched build'
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+must_fail 'after a string spanning a newline' <<DEF
+note="first line
+second line"
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+must_fail 'after a heredoc' <<DEF
+patch -p1 --force <<EOF
+--- a/configure
++++ b/configure
+-  old
++  new
+EOF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+must_fail 'after a quoted <<HIDE' <<DEF
+echo "<<HIDE"
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz"
+DEF
+
+# grep stops at whitespace, so these arrive with the next command still attached. Trimming
+# only trailing punctuation left it there and hid the extension.
+
+must_fail 'attached ;echo' <<DEF
+install_package "ruby-2.7.8" https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz;echo done
+DEF
+
+must_fail 'attached &&' <<DEF
+install_package "ruby-2.7.8" https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz&&echo done
+DEF
+
+must_fail 'attached |' <<DEF
+install_package "ruby-2.7.8" https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz|cat
+DEF
+
+must_fail 'attached )' <<DEF
+(install_package "ruby-2.7.8" https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz)
+DEF
+
+# Classification reads the path with the query removed, or this one doesn't look like an
+# archive at all.
+must_fail 'query string' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz?download=1"
+DEF
+
+# ruby-build compares digests case-sensitively against lowercase openssl output, so an
+# uppercase one never matches. Present but useless is worse than absent — it looks checked.
+must_fail 'uppercase digest' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#C2DAB63CBC8F2A05526108AD419EFA63A67ED4074DBBCF9FC2B1CA664CB45BA0"
+DEF
+
+must_fail 'digest too long (67 hex)' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#${DIGEST}abc"
+DEF
+
+must_fail 'digest too short (63 hex)' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#${DIGEST%?}"
+DEF
+
+# --- Must fail: every archive extension ------------------------------------
+# The real definitions only ever use .tar.gz, .tar.bz2 and .tgz, so the rest of the case
+# pattern has never been exercised by anything. A typo there fails open.
+
+printf '\nArchive extensions recognised (must be caught)\n'
+
+for ext in tar.gz tar.bz2 tar.xz tgz tbz2 tar.Z zip; do
+  must_fail ".$ext" <<DEF
+install_package "pkg-1.0" "https://example.com/pkg-1.0.$ext"
+DEF
+done
+
+# --- Must pass -------------------------------------------------------------
+
+printf '\nWell-formed definitions (must pass)\n'
+
+# `&` is both a shell operator and query syntax. Trimming before looking for the digest cut
+# this URL at the ampersand and reported a missing checksum that is right there.
+must_pass 'query with ampersand, digest after it' <<DEF
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz?a=1&b=2#$DIGEST"
+DEF
+
+must_pass 'line-continued with digest' <<DEF
+install_package "ruby-2.7.8" \\
+  "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#$DIGEST" \\
+  standard
+DEF
+
+must_pass 'split mid-scheme with digest' <<DEF
+install_package "ruby-2.7.8" "https\\
+://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#$DIGEST" standard
+DEF
+
+# --- Must be ignored -------------------------------------------------------
+# A regression here is a false positive: CI blocked, and signoff refused, over a URL that is
+# never fetched. That is the direction that gets checks deleted, so it is pinned too.
+
+printf '\nReference URLs (must be ignored)\n'
+
+must_pass 'issue and repo links in comments' <<DEF
+# Patched for https://bugs.ruby-lang.org/issues/1382
+# M1-compatible OpenSSL 1.0 from https://github.com/basecamp/homebrew-dev
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#$DIGEST" # see https://github.com/basecamp/ruby-dev
+DEF
+
+# GNU's git web view: a moving HEAD, no release tarball, no digest to cite. Skipped for
+# being no kind of archive rather than by an exemption list — two rounds of review went on
+# exemption patterns being wider than they claimed.
+must_pass 'savannah gitweb config.guess/config.sub' <<DEF
+freshen_automake_config() {
+  curl -fsSL -o config.guess 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+  curl -fsSL -o config.sub 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD'
+}
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#$DIGEST" standard
+DEF
+
+# --- The vacuous-pass guard ------------------------------------------------
+# Every failure in this lint's history reported success having inspected nothing. A file the
+# extractor finds no archive in is that state, not a clean file.
+
+printf '\nInspected nothing (must not be a pass)\n'
+
+lint_fixture 'only reference urls' <<DEF
+# See https://github.com/basecamp/ruby-dev/issues/1
+curl -fsSL -o config.guess 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+DEF
+case "$(failure_text)" in
+  *"no source archives found"*) ok 'a file with no archives is not a pass' ;;
+  *) bad 'a file with no archives is not a pass' "$(failure_text)" ;;
+esac
+
+# --- join_continuations ----------------------------------------------------
+# No real definition contains a line continuation, so nothing else here exercises this.
+# It matters because it decides what the extractor ever sees.
+
+printf '\njoin_continuations\n'
+
+printf '%s\n' \
+  'one \' \
+  'two' \
+  'three' \
+  'scheme="https\' \
+  '://host/pkg.tar.gz"' \
+  'trailing \' \
+  > "$FIXTURES/continuations"
+
+expected=$(printf '%s\n' 'one two' 'three' 'scheme="https://host/pkg.tar.gz"' 'trailing ')
+actual=$(join_continuations "$FIXTURES/continuations")
+if [ "$actual" = "$expected" ]; then
+  ok 'joins with nothing, as shell does, and flushes a trailing continuation'
+else
+  bad 'joins with nothing, as shell does, and flushes a trailing continuation' \
+    "got: $(printf '%s' "$actual" | tr '\n' '|')"
+fi
+
+# --- The real definitions --------------------------------------------------
+
+printf "\nThis repo's definitions\n"
+
+failures=()
+lint_checksums >/dev/null 2>&1
+if [ ${#failures[@]} -eq 0 ]; then
+  ok "all $(definitions | wc -l | tr -d ' ') definitions pass"
+else
+  bad 'the real definitions pass' "$(failure_text)"
+fi
+
+printf '\n'
+[ $failed -eq 0 ] && printf 'All %d tests passed.\n' "$tests" \
+                  || printf '%d of %d test(s) failed.\n' "$failed" "$tests"
+exit $failed
