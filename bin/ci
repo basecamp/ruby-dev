@@ -44,11 +44,13 @@ URL_RE="https?://[^[:space:]\"$SQ\`]+"
 # Drop shell comments before extracting URLs, so a reference link in a comment isn't
 # mistaken for a download and failed for lacking a digest.
 #
-# The `#` that opens a comment is always preceded by whitespace or starts the line; the `#`
-# introducing a digest never is — it follows the last character of the URL. Keying on that
-# distinction strips comments without touching `pkg.tar.gz#<sha256>`, which a naive
-# cut-at-first-hash would destroy, turning every checksummed URL into a failure.
-strip_comments() { sed -E 's/(^|[[:space:]])#.*$//'; }
+# A `#` opens a comment when it starts a word: at line start, after whitespace, or straight
+# after an operator that ends the previous word — `echo one;# two` really is a comment to
+# bash, verified rather than assumed. The `#` introducing a digest never starts a word; it
+# follows the last character of the URL. Keying on that distinction strips comments without
+# touching `pkg.tar.gz#<sha256>`, which a naive cut-at-first-hash would destroy, turning
+# every checksummed URL into a failure.
+strip_comments() { sed -E 's/(^|[[:space:];&|()<>])#.*$//'; }
 
 trim_url() {
   local u="$1"
