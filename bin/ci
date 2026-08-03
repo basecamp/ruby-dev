@@ -15,13 +15,6 @@
 # subset is worse than not signing off at all.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-
-# Before anything else, so --help doesn't sit through a lint pass first.
-case "${1:-}" in
-  -h|--help) sed -n '2,15p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
-esac
-
 BANNER=$'\033[1;32m'; TITLE=$'\033[1;35m'; SUBTITLE=$'\033[1;90m'
 ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
 
@@ -49,8 +42,6 @@ trim_url() {
   printf '%s' "${u%%[;\)\(\&\|\<\>]*}"
 }
 
-echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
-
 heading() { printf '\n%s%s%s\n' "$TITLE" "$1" "$RESET"; [ $# -gt 1 ] && printf '%s%s%s\n' "$SUBTITLE" "$2" "$RESET"; return 0; }
 pass()    { printf '%s  ✓ %s%s\n' "$SUCCESS" "$1" "$RESET"; }
 fail()    { printf '%s  ✗ %s%s\n' "$ERROR" "$1" "$RESET"; failures+=("$1"); }
@@ -77,7 +68,7 @@ require_definitions() {
 lint_syntax() {
   heading "Syntax" "bash -n over scripts and definitions"
   local f
-  for f in bin/ci test/build $(definitions); do
+  for f in bin/ci test/build test/lint $(definitions); do
     if bash -n "$f" 2>/dev/null; then pass "$f"; else fail "$f has a syntax error"; bash -n "$f" || true; fi
   done
 }
@@ -176,6 +167,25 @@ lint_checksums() {
   done
 }
 
+# --- Lint tests -------------------------------------------------------------
+# The checksum lint's own regression corpus. Run here, not just syntax-checked, because a
+# regression suite CI never executes is one that rots unnoticed — which is the same
+# inspected-nothing failure the lint it covers kept producing.
+#
+# test/lint sources this file, which is why everything above is definitions and only a
+# direct run does anything. Output is swallowed unless it fails; its per-case lines would
+# drown this summary.
+lint_tests() {
+  heading "Lint tests" "test/lint over the checksum lint"
+  local out
+  if out=$(test/lint 2>&1); then
+    pass "$(printf '%s' "$out" | tail -1)"
+  else
+    fail "test/lint"
+    printf '%s\n' "$out"
+  fi
+}
+
 # --- Shellcheck -------------------------------------------------------------
 # Optional: not everywhere, and not worth blocking a build matrix over. Report
 # the skip out loud rather than passing silently, so nobody reads a green run as
@@ -194,7 +204,7 @@ lint_shellcheck() {
   # find on version-numbered filenames, deliberate word splitting). Gating on info
   # would mean either noisy failures or a scattering of disable comments, and both
   # train people to ignore the step.
-  if shellcheck -s bash --severity=warning bin/ci test/build; then
+  if shellcheck -s bash --severity=warning bin/ci test/build test/lint; then
     pass "scripts"
   else
     fail "shellcheck"
@@ -222,33 +232,54 @@ signoff() {
   gh signoff
 }
 
-started=$SECONDS
+main() {
+  cd "$(dirname "$0")/.."
 
-require_definitions
-lint_syntax
-lint_checksums
-lint_shellcheck
+  # Before anything else, so --help doesn't sit through a lint pass first.
+  case "${1:-}" in
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+  esac
 
-partial=false
-case "${1:-}" in
-  --lint) partial=true ;;
-  "")     build_matrix ;;
-  *)      partial=true; build_matrix "$@" ;;
-esac
+  echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
 
-elapsed=$(( SECONDS - started ))
+  local started=$SECONDS
 
-if [ ${#failures[@]} -eq 0 ]; then
-  printf '\n%s✅ CI passed in %ds%s\n' "$SUCCESS" "$elapsed" "$RESET"
-  if $partial; then
-    printf '%s📋 Partial run — not signing off. Run bin/ci with no arguments to sign off.%s\n' \
-      "$SUBTITLE" "$RESET"
+  require_definitions
+  lint_syntax
+  lint_checksums
+  lint_tests
+  lint_shellcheck
+
+  local partial=false
+  case "${1:-}" in
+    --lint) partial=true ;;
+    "")     build_matrix ;;
+    *)      partial=true; build_matrix "$@" ;;
+  esac
+
+  local elapsed=$(( SECONDS - started ))
+
+  if [ ${#failures[@]} -eq 0 ]; then
+    printf '\n%s✅ CI passed in %ds%s\n' "$SUCCESS" "$elapsed" "$RESET"
+    if $partial; then
+      printf '%s📋 Partial run — not signing off. Run bin/ci with no arguments to sign off.%s\n' \
+        "$SUBTITLE" "$RESET"
+    else
+      signoff
+    fi
   else
-    signoff
+    printf '\n%s❌ CI failed in %ds%s\n' "$ERROR" "$elapsed" "$RESET"
+    local f
+    for f in "${failures[@]}"; do printf '%s   • %s%s\n' "$ERROR" "$f" "$RESET"; done
+    printf '%s📋 No sign-off. Fix the issues and try again.%s\n' "$SUBTITLE" "$RESET"
+    exit 1
   fi
-else
-  printf '\n%s❌ CI failed in %ds%s\n' "$ERROR" "$elapsed" "$RESET"
-  for f in "${failures[@]}"; do printf '%s   • %s%s\n' "$ERROR" "$f" "$RESET"; done
-  printf '%s📋 No sign-off. Fix the issues and try again.%s\n' "$SUBTITLE" "$RESET"
-  exit 1
+}
+
+# Everything above is definitions, so test/lint can source this file and call the lints
+# directly. Only a direct run does anything: sourced, this would cd elsewhere, print a
+# banner, run all three lints over the sourcing script's arguments, and exit 1 out of the
+# harness that sourced it.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
 fi
