@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Docker platforms only. `native` is a platform too, but it is opt-in by name and
+# deliberately not in here: `test/build all` must stay a clean-room test, and a native
+# build compiles against whatever the host happens to have installed.
 PLATFORMS="ubuntu-noble arch"
 
 # macOS ships BSD sort, which rejects -V. Fall back to plain sort there rather than dying
@@ -41,7 +44,7 @@ usage() {
   cat <<EOF
 Usage: test/build <platform> [version]
 
-Platforms: $(echo $PLATFORMS | tr ' ' ', '), all
+Platforms: $(echo $PLATFORMS | tr ' ' ', '), all, native
 Versions:  $(echo $VERSIONS | tr '\n' ' '), all
 
 Examples:
@@ -49,6 +52,12 @@ Examples:
   test/build arch all              # Test all versions on Arch
   test/build all 2.7.8             # Test Ruby 2.7.8 on all platforms
   test/build all                   # Test everything
+  test/build native all            # Test every version on this host, no Docker
+
+The 'native' platform builds on the host with your own toolchain, into a
+throwaway prefix that is removed once verified. It is how macOS gets tested at
+all — there is no container for it — and it is never part of 'all', because it
+proves nothing about a clean machine.
 
 Environment:
   JOBS=$JOBS         Containers built concurrently
@@ -72,6 +81,10 @@ platform_for() {
 
 build_image() {
   local platform=$1
+
+  # Nothing to build for a host build.
+  [[ $platform == native ]] && return 0
+
   local dockerfile="test/${platform}.dockerfile"
   local image="ruby-build-test:${platform}"
   local target_platform
@@ -107,6 +120,10 @@ build_image() {
 
 # Default post-flight checks - can be overridden via test/verify/<version>
 #
+# $RUBY_PREFIX is supplied by whoever runs the script: /opt/ruby in a container, a
+# throwaway directory for a native build. Same assertions either way — the whole point of
+# the native mode is that macOS gets tested against these and not a weaker set.
+#
 # The arithmetic check is not paranoia. These sources predate the compilers building them
 # and their fixnum overflow checks assume signed overflow wraps, which is undefined
 # behaviour GCC exploits from -O2 up. A 1.8.7 built -O3 without -fno-strict-overflow
@@ -115,30 +132,24 @@ build_image() {
 # arithmetic. Kept 1.8.7-compatible: no interpolation-free heredocs, no modern syntax.
 default_verify_script() {
   cat <<'VERIFY'
-/opt/ruby/bin/ruby -e 'require "openssl"; puts "openssl: #{OpenSSL::OPENSSL_VERSION}"'
-/opt/ruby/bin/ruby -e 'require "digest/sha2"; puts "digest: ok"'
-/opt/ruby/bin/ruby -e 'require "zlib"; puts "zlib: ok"'
-/opt/ruby/bin/ruby -e 'raise "2**64 wrong: #{2**64}" unless (2**64).to_s == "18446744073709551616"; raise "2**100 wrong" unless (2**100).to_s == "1267650600228229401496703205376"; raise "mul overflow wrong" unless (4611686018427387903 * 2).to_s == "9223372036854775806"; raise "negative overflow wrong" unless (-2**64).to_s == "-18446744073709551616"; raise "10**20 wrong" unless (10**20).to_s == "100000000000000000000"; puts "arithmetic: ok"'
+"$RUBY_PREFIX"/bin/ruby -e 'require "openssl"; puts "openssl: #{OpenSSL::OPENSSL_VERSION}"'
+"$RUBY_PREFIX"/bin/ruby -e 'require "digest/sha2"; puts "digest: ok"'
+"$RUBY_PREFIX"/bin/ruby -e 'require "zlib"; puts "zlib: ok"'
+"$RUBY_PREFIX"/bin/ruby -e 'raise "2**64 wrong: #{2**64}" unless (2**64).to_s == "18446744073709551616"; raise "2**100 wrong" unless (2**100).to_s == "1267650600228229401496703205376"; raise "mul overflow wrong" unless (4611686018427387903 * 2).to_s == "9223372036854775806"; raise "negative overflow wrong" unless (-2**64).to_s == "-18446744073709551616"; raise "10**20 wrong" unless (10**20).to_s == "100000000000000000000"; puts "arithmetic: ok"'
 VERIFY
 }
 
-test_ruby() {
+# Build in a container and run the post-flight checks there.
+docker_build() {
   local platform=$1
   local version=$2
+  local verify_script=$3
   local image="ruby-build-test:${platform}"
   local target_platform
   target_platform=$(platform_for "$platform")
   local platform_flag=""
 
   [[ -n "$target_platform" ]] && platform_flag="--platform $target_platform"
-
-  # Use version-specific verify script if it exists, otherwise use defaults
-  local verify_script
-  if [[ -f "test/verify/$version" ]]; then
-    verify_script=$(cat "test/verify/$version")
-  else
-    verify_script=$(default_verify_script)
-  fi
 
   # Build Ruby and run post-flight checks.
   #
@@ -148,30 +159,88 @@ test_ruby() {
   # curl progress bars.
   local build_script="
     set -e
-    ruby-build $version /opt/ruby || {
+    export RUBY_PREFIX=/opt/ruby
+    ruby-build $version \"\$RUBY_PREFIX\" || {
       echo '--- ruby-build log (tail) ---'
       tail -60 /tmp/ruby-build.*.log 2>/dev/null
       exit 1
     }
-    /opt/ruby/bin/ruby --version
+    \"\$RUBY_PREFIX\"/bin/ruby --version
     $verify_script
   "
 
-  local started=$SECONDS output elapsed
   # $platform_flag is deliberately unquoted: it holds two words ("--platform
   # linux/amd64") and must split into two arguments. An array would be the tidier
   # idiom, but expanding an empty one under `set -u` is an error on macOS's Bash
   # 3.2, and this script has to keep working there.
   # shellcheck disable=SC2086
-  if output=$(docker run --rm $platform_flag -e MAKE_OPTS="-j${MAKE_JOBS}" \
-                "$image" bash -c "$build_script" 2>&1); then
-    elapsed=$(( SECONDS - started ))
+  docker run --rm $platform_flag -e MAKE_OPTS="-j${MAKE_JOBS}" \
+    "$image" bash -c "$build_script"
+}
+
+# Build on this host, with this host's toolchain, into a throwaway prefix — then run the
+# same checks the containers run. There is no macOS container, so this is the only way to
+# find out what Apple clang does with these sources, which is exactly the question the
+# arithmetic assertion answers.
+#
+# Both the prefix and ruby-build's scratch/log directory are removed as soon as the build
+# has been judged. A full matrix is six Rubies and several GB, and the machines that need
+# this test are laptops.
+native_build() {
+  local version=$1
+  local verify_script=$2
+  local prefix tmp rc=0
+
+  prefix=$(mktemp -d)
+  # ruby-build derives both its log path and its build directory from TMPDIR. Giving each
+  # build its own means the failure tail below is this build's log and not a neighbour's,
+  # which matters because these run concurrently.
+  tmp=$(mktemp -d)
+
+  if TMPDIR="$tmp" MAKE_OPTS="-j${MAKE_JOBS}" RUBY_BUILD_DEFINITIONS="$PWD" \
+       "$RUBY_BUILD" "$version" "$prefix"; then
+    local check_script="
+      set -e
+      \"\$RUBY_PREFIX\"/bin/ruby --version
+      $verify_script
+    "
+    RUBY_PREFIX="$prefix" bash -c "$check_script" || rc=1
+  else
+    rc=1
+    echo '--- ruby-build log (tail) ---'
+    tail -60 "$tmp"/ruby-build.*.log 2>/dev/null || true
+  fi
+
+  rm -rf "$prefix" "$tmp"
+  return $rc
+}
+
+test_ruby() {
+  local platform=$1
+  local version=$2
+
+  # Use version-specific verify script if it exists, otherwise use defaults
+  local verify_script
+  if [[ -f "test/verify/$version" ]]; then
+    verify_script=$(cat "test/verify/$version")
+  else
+    verify_script=$(default_verify_script)
+  fi
+
+  local started=$SECONDS output elapsed ruby_version status=pass
+  if [[ $platform == native ]]; then
+    output=$(native_build "$version" "$verify_script" 2>&1) || status=fail
+  else
+    output=$(docker_build "$platform" "$version" "$verify_script" 2>&1) || status=fail
+  fi
+  elapsed=$(( SECONDS - started ))
+
+  if [[ $status == pass ]]; then
     ruby_version=$(echo "$output" | grep -o 'ruby [0-9].*\]' | tail -1)
     # One printf so concurrent jobs can't interleave mid-line.
     printf '  %-14s %-14s ✓  %-62s %4ds\n' "$platform" "$version" "$ruby_version" "$elapsed"
     echo "pass" > "$RESULTS/$platform.$version.status"
   else
-    elapsed=$(( SECONDS - started ))
     printf '  %-14s %-14s ✗  %-62s %4ds\n' "$platform" "$version" "FAILED" "$elapsed"
     echo "fail" > "$RESULTS/$platform.$version.status"
     # Keep the log for the end-of-run report rather than interleaving it with
@@ -195,8 +264,46 @@ version=${2:-all}
 
 # Validate platform
 for p in $platforms; do
-  [[ ! -f "test/${p}.dockerfile" ]] && { echo "Unknown platform: $p"; exit 1; }
+  case $p in
+    native) ;;
+    *) [[ ! -f "test/${p}.dockerfile" ]] && { echo "Unknown platform: $p"; exit 1; } ;;
+  esac
 done
+
+# Resolve ruby-build once, up front, so a missing one is a single clear error before any
+# builds start rather than N identical failures inside background jobs.
+#
+# It often isn't on PATH: mise keeps its own copy and invokes it directly, so a machine that
+# builds these definitions every day can still have no `ruby-build` command. Ask mise where
+# that copy is rather than assuming ~/.cache/mise — on macOS, the platform this whole mode
+# exists for, the cache is under ~/Library/Caches. mise also only clones it when it has to
+# compile something, so a machine can have mise, have built these Rubies, and still not have
+# it cached; that's what the error below is for. Never a silent skip: a native run that
+# can't build is a failed run.
+mise_ruby_build() {
+  local cache
+  command -v mise >/dev/null 2>&1 || return 1
+  cache=$(mise cache 2>/dev/null) || return 1
+  [[ -n "$cache" && -x "$cache/ruby/ruby-build/bin/ruby-build" ]] || return 1
+  printf '%s\n' "$cache/ruby/ruby-build/bin/ruby-build"
+}
+
+RUBY_BUILD=""
+case " $platforms " in
+  *" native "*)
+    if command -v ruby-build >/dev/null 2>&1; then
+      RUBY_BUILD=$(command -v ruby-build)
+    elif RUBY_BUILD=$(mise_ruby_build); then
+      :
+    else
+      echo "error: native builds need ruby-build, and none was found." >&2
+      echo "       Looked on PATH and in mise's cache." >&2
+      echo "       Install it — 'brew install ruby-build' on macOS — or use a Docker platform." >&2
+      exit 1
+    fi
+    echo "Using ruby-build: $RUBY_BUILD"
+    ;;
+esac
 
 # Validate version
 for v in $versions; do
