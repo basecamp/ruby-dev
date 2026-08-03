@@ -41,6 +41,15 @@ URL_RE="https?://[^[:space:]\"$SQ\`]+"
 # Strip trailing shell punctuation left over from an unquoted URL (`…tar.gz; fi`,
 # `…tar.gz && echo`). Safe because none of these can legitimately end a URL, unlike the
 # semicolons that appear mid-query-string above.
+# Drop shell comments before extracting URLs, so a reference link in a comment isn't
+# mistaken for a download and failed for lacking a digest.
+#
+# The `#` that opens a comment is always preceded by whitespace or starts the line; the `#`
+# introducing a digest never is — it follows the last character of the URL. Keying on that
+# distinction strips comments without touching `pkg.tar.gz#<sha256>`, which a naive
+# cut-at-first-hash would destroy, turning every checksummed URL into a failure.
+strip_comments() { sed -E 's/(^|[[:space:]])#.*$//'; }
+
 trim_url() {
   local u="$1"
   while :; do
@@ -154,7 +163,7 @@ lint_checksums() {
       esac
       found=$(( found + 1 ))
       [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
-    done < <(join_continuations "$f" | grep -v '^[[:space:]]*#' | grep -oE "$URL_RE")
+    done < <(join_continuations "$f" | strip_comments | grep -oE "$URL_RE")
     # Every definition downloads at least Ruby itself. Finding nothing means the extractor
     # stopped matching, not that the file is clean — don't call that a pass.
     if [ "$found" -eq 0 ]; then
