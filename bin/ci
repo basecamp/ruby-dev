@@ -38,18 +38,16 @@ failures=()
 SQ="'"
 URL_RE="https?://[^[:space:]\"$SQ\`]+"
 
-# Strip trailing shell punctuation left over from an unquoted URL (`…tar.gz; fi`,
-# `…tar.gz && echo`). Safe because none of these can legitimately end a URL, unlike the
-# semicolons that appear mid-query-string above.
+# Cut an unquoted URL where the shell command continues. grep stops at whitespace, so
+# `…tar.gz;echo done` arrives with `;echo` still attached — and trimming only trailing
+# punctuation left it there, hiding the archive extension and skipping the download.
+#
+# Cutting at the *first* operator rather than the last is safe now that archive shape
+# decides what gets checked: the savannah gitweb links are the only URLs here with
+# mid-string semicolons, and they aren't archives either way.
 trim_url() {
   local u="$1"
-  while :; do
-    case "$u" in
-      *[\;\)\(\&\|\<\>]) u="${u%?}" ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$u"
+  printf '%s' "${u%%[;\)\(\&\|\<\>]*}"
 }
 
 echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
