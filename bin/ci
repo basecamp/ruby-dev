@@ -61,8 +61,10 @@ comment_index() {
   # scoping — which happens to hold the same string today, so this scanned correctly
   # by accident and would have silently stopped stripping if either were renamed.
   local line="$1"
-  local n=${#line} i=0 c prev="" insq=0 indq=0
+  local n=${#line} i=0 c prev="" insq="${2:-0}" indq="${3:-0}"
   COMMENT_IDX=-1
+  Q_SQ=$insq
+  Q_DQ=$indq
 
   # This models ordinary '...' and "..." quoting, and nothing else. Shell has more:
   # $'...' has its own escape rules, $"..." is locale translation, and there are
@@ -94,7 +96,9 @@ comment_index() {
         '\') i=$(( i + 1 )) ;;
         '#')
           case "$prev" in
-            ''|[[:space:]]|';'|'&'|'|'|'('|')'|'<'|'>') COMMENT_IDX=$i; return 0 ;;
+            ''|[[:space:]]|';'|'&'|'|'|'('|')'|'<'|'>')
+              # A comment only opens outside quotes, so the line ends unquoted.
+              COMMENT_IDX=$i; Q_SQ=0; Q_DQ=0; return 0 ;;
           esac
           ;;
       esac
@@ -102,13 +106,21 @@ comment_index() {
     prev="$c"
     i=$(( i + 1 ))
   done
+  Q_SQ=$insq
+  Q_DQ=$indq
   return 0
 }
 
 strip_comments() {
-  local line
+  # Quote state is carried between lines, because quoting is not a per-line property: a
+  # string can hold a literal newline, and everything up to its closing quote is data.
+  # Restarting unquoted on each line made a `#` inside such a string look like a comment
+  # and truncated the rest of the line — taking any real download on it along too.
+  local line insq=0 indq=0
   while IFS= read -r line || [ -n "$line" ]; do
-    comment_index "$line"
+    comment_index "$line" "$insq" "$indq"
+    insq=$Q_SQ
+    indq=$Q_DQ
     if [ "$COMMENT_IDX" -ge 0 ]; then
       printf '%s\n' "${line:0:$COMMENT_IDX}"
     else
