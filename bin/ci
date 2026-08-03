@@ -44,13 +44,63 @@ URL_RE="https?://[^[:space:]\"$SQ\`]+"
 # Drop shell comments before extracting URLs, so a reference link in a comment isn't
 # mistaken for a download and failed for lacking a digest.
 #
-# A `#` opens a comment when it starts a word: at line start, after whitespace, or straight
-# after an operator that ends the previous word — `echo one;# two` really is a comment to
-# bash, verified rather than assumed. The `#` introducing a digest never starts a word; it
-# follows the last character of the URL. Keying on that distinction strips comments without
-# touching `pkg.tar.gz#<sha256>`, which a naive cut-at-first-hash would destroy, turning
-# every checksummed URL into a failure.
-strip_comments() { sed -E 's/(^|[[:space:];&|()<>])#.*$//'; }
+# Find where a comment starts on a line, tracking quote state rather than pattern-matching
+# for it. Sets COMMENT_IDX to the offset, or -1.
+#
+# A `#` opens a comment only when it starts a word *and* is not inside quotes. Successive
+# regexes for this kept being wrong in a new way: they missed `;#`, or they fired on the
+# literal hash in `"download #1"` and silently truncated a real install_package off the end
+# of the line. Both directions matter — one blocks CI over a URL nothing fetches, the other
+# skips a genuine unverified download.
+#
+# Quoting cannot be expressed as a regex over a line, so scan it. Digests survive because a
+# digest's `#` follows the last character of the URL and so never starts a word.
+comment_index() {
+  # Two statements on purpose: in a single `local`, ${#line} would not see the `line`
+  # assigned beside it. It would instead resolve to the caller's `line` via dynamic
+  # scoping — which happens to hold the same string today, so this scanned correctly
+  # by accident and would have silently stopped stripping if either were renamed.
+  local line="$1"
+  local n=${#line} i=0 c prev="" insq=0 indq=0
+  COMMENT_IDX=-1
+  while [ "$i" -lt "$n" ]; do
+    c="${line:$i:1}"
+    if [ "$insq" = 1 ]; then
+      [ "$c" = "'" ] && insq=0
+    elif [ "$indq" = 1 ]; then
+      case "$c" in
+        '\') i=$(( i + 1 )) ;;   # backslash escapes the next char inside "..."
+        '"') indq=0 ;;
+      esac
+    else
+      case "$c" in
+        "'") insq=1 ;;
+        '"') indq=1 ;;
+        '\') i=$(( i + 1 )) ;;
+        '#')
+          case "$prev" in
+            ''|[[:space:]]|';'|'&'|'|'|'('|')'|'<'|'>') COMMENT_IDX=$i; return 0 ;;
+          esac
+          ;;
+      esac
+    fi
+    prev="$c"
+    i=$(( i + 1 ))
+  done
+  return 0
+}
+
+strip_comments() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    comment_index "$line"
+    if [ "$COMMENT_IDX" -ge 0 ]; then
+      printf '%s\n' "${line:0:$COMMENT_IDX}"
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
 
 trim_url() {
   local u="$1"
