@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Local CI. There is no cloud CI for this repo — run this, then `gh signoff`
+# marks the commit green so the PR can merge.
+#
+# Bash rather than the Ruby CI class the app repos use, deliberately: this repo
+# exists because a working Ruby is the thing you don't have yet. Its own CI must
+# not need one.
+#
+#   bin/ci                    # lint + full build matrix, then sign off
+#   bin/ci arch               # lint + Arch only        (no signoff — partial run)
+#   bin/ci arch 2.7.8         # lint + one build        (no signoff — partial run)
+#   bin/ci --lint             # lint only, no Docker    (no signoff — partial run)
+#
+# Only a full run signs off. A partial run deliberately won't: signing off on a
+# subset is worse than not signing off at all.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Before anything else, so --help doesn't sit through a lint pass first.
+case "${1:-}" in
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+esac
+
+BANNER=$'\033[1;32m'; TITLE=$'\033[1;35m'; SUBTITLE=$'\033[1;90m'
+ERROR=$'\033[1;31m';  SUCCESS=$'\033[1;32m'; RESET=$'\033[0m'
+
+failures=()
+
+# A URL runs to the next whitespace or quote. Shell metacharacters are captured here and
+# cut afterwards by trim_url, rather than excluded outright, so that an unquoted URL with
+# a command attached (`…tar.gz;echo`) is seen whole before being trimmed — grep alone
+# can't tell where the URL ends and the next command begins.
+#
+# Built here rather than inline because embedding a single quote inside a single-quoted
+# grep pattern is unreadable.
+SQ="'"
+URL_RE="https?://[^[:space:]\"$SQ\`]+"
+
+# Cut an unquoted URL where the shell command continues. grep stops at whitespace, so
+# `…tar.gz;echo done` arrives with `;echo` still attached — and trimming only trailing
+# punctuation left it there, hiding the archive extension and skipping the download.
+#
+# Cutting at the *first* operator rather than the last is safe now that archive shape
+# decides what gets checked: the savannah gitweb links are the only URLs here with
+# mid-string semicolons, and they aren't archives either way.
+trim_url() {
+  local u="$1"
+  printf '%s' "${u%%[;\)\(\&\|\<\>]*}"
+}
+
+echo "${BANNER}🚀 Local CI for ruby-dev${RESET}"
+
+heading() { printf '\n%s%s%s\n' "$TITLE" "$1" "$RESET"; [ $# -gt 1 ] && printf '%s%s%s\n' "$SUBTITLE" "$2" "$RESET"; return 0; }
+pass()    { printf '%s  ✓ %s%s\n' "$SUCCESS" "$1" "$RESET"; }
+fail()    { printf '%s  ✗ %s%s\n' "$ERROR" "$1" "$RESET"; failures+=("$1"); }
+
+# Plain `sort`, not `sort -V`: macOS ships BSD sort, which rejects -V. That failure would
+# not trip set -e here (it's a command substitution inside a `for` list), so the list would
+# come back empty and every check below would silently pass over nothing — a green run that
+# linted zero definitions. Ordering is cosmetic for linting, so portability wins.
+definitions() { ls -1 [0-9]* 2>/dev/null | sort; }
+
+# And belt-and-braces: whatever the cause — wrong directory, failed glob, broken sort — an
+# empty list must be a hard error, never a quiet pass.
+require_definitions() {
+  if [ -z "$(definitions)" ]; then
+    printf '%serror: no definition files found in %s — refusing to report success%s\n' \
+      "$ERROR" "$PWD" "$RESET" >&2
+    exit 1
+  fi
+}
+
+# --- Shell syntax -----------------------------------------------------------
+# Definitions are sourced by ruby-build, so a syntax error in one is a build
+# failure several minutes into a Docker run. Catch it in milliseconds instead.
+lint_syntax() {
+  heading "Syntax" "bash -n over scripts and definitions"
+  local f
+  for f in bin/ci test/build $(definitions); do
+    if bash -n "$f" 2>/dev/null; then pass "$f"; else fail "$f has a syntax error"; bash -n "$f" || true; fi
+  done
+}
+
+# --- Checksums --------------------------------------------------------------
+# Fold backslash-continued lines into one, so an install_package spelled across several
+# lines is inspected whole. Matching raw lines would see only the first, and a missing
+# checksum on a continuation would pass unnoticed — with another well-formed call in the
+# file, even the "found nothing" guard below wouldn't fire.
+#
+# Pure bash rather than sed/awk: the usual line-joining one-liners differ between BSD and
+# GNU, and macOS portability is the entire point of this section.
+join_continuations() {
+  local line acc=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "${line%\\}" != "$line" ]; then
+      # Join with nothing, matching shell: a backslash-newline is removed entirely, it
+      # does not become whitespace. Inserting a space would split tokens shell keeps
+      # together — `"https\` + `://host/x"` is one URL to bash but would arrive here as
+      # `https ://host/x` and match nothing, silently skipping that download. Ordinary
+      # continuations already carry their own whitespace around the backslash.
+      acc="${acc}${line%\\}"
+    else
+      printf '%s%s\n' "$acc" "$line"
+      acc=""
+    fi
+  done < "$1"
+  [ -n "$acc" ] && printf '%s\n' "$acc"
+  return 0
+}
+
+# ruby-build only verifies a download when the URL carries a #checksum. Without one it
+# fetches and builds whatever it got, silently. A missing checksum is the kind of thing
+# that survives review, so assert it here.
+#
+# Every URL in the file is considered, wherever it appears, and the ones that look like
+# source archives must carry a digest. No attempt is made to work out which are arguments
+# and which are prose — that question is what made earlier versions of this wrong.
+#
+# The cost is that a tarball URL written in a comment gets flagged too. That is rare, it
+# says exactly what to do about it, and it errs loud rather than quiet. Reference links in
+# these definitions point at issues and repos, not tarballs, so it doesn't arise today.
+#
+# Not checked, deliberately: the config.guess and config.sub fetches in 1.8.7 and 1.9.3.
+# They come from GNU's git web view, which serves a moving HEAD with no release tarball
+# and no digest to cite. They aren't archives, so they fall outside this rule naturally
+# rather than needing an exemption list. The same is true of any future non-archive
+# download, which is the honest limitation of matching on shape.
+lint_checksums() {
+  heading "Checksums" "every source archive carries a #sha256"
+  local f raw url base path ok found
+  for f in $(definitions); do
+    ok=true
+    found=0
+    while IFS= read -r raw; do
+      # Two questions, deliberately answered from different strings.
+      #
+      # Whether a digest is present is asked of the untrimmed URL, because `&` is both a
+      # shell operator and ordinary query syntax. Trimming first would cut
+      # `…tar.gz?a=1&b=2#<digest>` at the ampersand and report a missing digest that is
+      # right there.
+      #
+      # What kind of URL it is gets asked of the trimmed path, so an attached command
+      # (`…tar.gz;echo`) or a query string (`…tar.gz?download=1`) can't hide the extension.
+      url=$(trim_url "$raw")
+      base=${url%%#*}      # up to the digest — what to report
+      path=${base%%\?*}    # and without the query — what to classify on
+      # Only archives are checked, and that is what removes the need to understand the
+      # shell around them. install_package fetches release tarballs, so a URL ending in
+      # an archive extension is a download; anything else is a reference.
+      #
+      # The alternative was deciding by position — is this URL an argument, or inside a
+      # comment, or inside a heredoc — which means tokenising shell, and that is where
+      # every bug in this check came from. Quoting, continuations, `;#`, ANSI-C strings,
+      # heredocs: each one handled, each one exposing the next. Matching on what the URL
+      # *is* needs none of it.
+      case "$path" in
+        *.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz2|*.tar.Z|*.zip) ;;
+        *) continue ;;
+      esac
+      found=$(( found + 1 ))
+      # Unanchored, with a boundary, since the digest may be followed by a query
+      # remnant or an attached command rather than ending the string.
+      [[ $raw =~ \#[0-9a-f]{64}([^0-9a-f]|$) ]] || { fail "$f: no sha256 on $base"; ok=false; }
+    done < <(join_continuations "$f" | grep -oE "$URL_RE")
+    # Every definition fetches at least Ruby itself as a tarball. Finding none means the
+    # extractor stopped matching, not that the file is clean — don't call that a pass.
+    if [ "$found" -eq 0 ]; then
+      fail "$f: no source archives found — checksum lint could not inspect this file"
+      ok=false
+    fi
+    # Explicit if, not `$ok && pass`: that leaves the loop's exit status at 1 when
+    # the *last* definition fails, and set -e then kills the run before the later
+    # checks and the summary — failures reported, no verdict.
+    if $ok; then pass "$f"; fi
+  done
+}
+
+# --- Shellcheck -------------------------------------------------------------
+# Optional: not everywhere, and not worth blocking a build matrix over. Report
+# the skip out loud rather than passing silently, so nobody reads a green run as
+# "shellcheck is clean" when it never ran.
+lint_shellcheck() {
+  heading "Shellcheck" "optional static analysis"
+  if ! command -v shellcheck >/dev/null; then
+    printf '%s  – skipped: shellcheck not installed%s\n' "$SUBTITLE" "$RESET"
+    return 0
+  fi
+  # Scripts only. Definitions are ruby-build fragments, not standalone scripts —
+  # they call install_package et al from their sourcing shell, so shellcheck reads
+  # every one of those as an unknown command.
+  #
+  # --severity=warning on purpose: the info tier here is all intentional (ls over
+  # find on version-numbered filenames, deliberate word splitting). Gating on info
+  # would mean either noisy failures or a scattering of disable comments, and both
+  # train people to ignore the step.
+  if shellcheck -s bash --severity=warning bin/ci test/build; then
+    pass "scripts"
+  else
+    fail "shellcheck"
+  fi
+}
+
+# --- Build matrix -----------------------------------------------------------
+build_matrix() {
+  heading "Builds" "test/build ${*:-all}"
+  if ! docker info >/dev/null 2>&1; then
+    fail "Docker isn't available — the build matrix can't run"
+    return 0
+  fi
+  if test/build "${@:-all}"; then pass "build matrix"; else fail "build matrix"; fi
+}
+
+# --- Signoff ----------------------------------------------------------------
+signoff() {
+  heading "📋 Signoff" "gh signoff"
+  if ! command -v gh >/dev/null || ! gh extension list 2>/dev/null | grep -q gh-signoff; then
+    printf '%s  – skipped: gh signoff not installed (gh extension install basecamp/gh-signoff)%s\n' \
+      "$SUBTITLE" "$RESET"
+    return 0
+  fi
+  gh signoff
+}
+
+started=$SECONDS
+
+require_definitions
+lint_syntax
+lint_checksums
+lint_shellcheck
+
+partial=false
+case "${1:-}" in
+  --lint) partial=true ;;
+  "")     build_matrix ;;
+  *)      partial=true; build_matrix "$@" ;;
+esac
+
+elapsed=$(( SECONDS - started ))
+
+if [ ${#failures[@]} -eq 0 ]; then
+  printf '\n%s✅ CI passed in %ds%s\n' "$SUCCESS" "$elapsed" "$RESET"
+  if $partial; then
+    printf '%s📋 Partial run — not signing off. Run bin/ci with no arguments to sign off.%s\n' \
+      "$SUBTITLE" "$RESET"
+  else
+    signoff
+  fi
+else
+  printf '\n%s❌ CI failed in %ds%s\n' "$ERROR" "$elapsed" "$RESET"
+  for f in "${failures[@]}"; do printf '%s   • %s%s\n' "$ERROR" "$f" "$RESET"; done
+  printf '%s📋 No sign-off. Fix the issues and try again.%s\n' "$SUBTITLE" "$RESET"
+  exit 1
+fi
