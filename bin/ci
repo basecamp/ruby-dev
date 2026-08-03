@@ -41,122 +41,6 @@ URL_RE="https?://[^[:space:]\"$SQ\`]+"
 # Strip trailing shell punctuation left over from an unquoted URL (`…tar.gz; fi`,
 # `…tar.gz && echo`). Safe because none of these can legitimately end a URL, unlike the
 # semicolons that appear mid-query-string above.
-# Drop shell comments before extracting URLs, so a reference link in a comment isn't
-# mistaken for a download and failed for lacking a digest.
-#
-# Find where a comment starts on a line, tracking quote state rather than pattern-matching
-# for it. Sets COMMENT_IDX to the offset, or -1.
-#
-# A `#` opens a comment only when it starts a word *and* is not inside quotes. Successive
-# regexes for this kept being wrong in a new way: they missed `;#`, or they fired on the
-# literal hash in `"download #1"` and silently truncated a real install_package off the end
-# of the line. Both directions matter — one blocks CI over a URL nothing fetches, the other
-# skips a genuine unverified download.
-#
-# Quoting cannot be expressed as a regex over a line, so scan it. Digests survive because a
-# digest's `#` follows the last character of the URL and so never starts a word.
-comment_index() {
-  # Two statements on purpose: in a single `local`, ${#line} would not see the `line`
-  # assigned beside it. It would instead resolve to the caller's `line` via dynamic
-  # scoping — which happens to hold the same string today, so this scanned correctly
-  # by accident and would have silently stopped stripping if either were renamed.
-  local line="$1"
-  local n=${#line} i=0 c prev="" insq="${2:-0}" indq="${3:-0}"
-  COMMENT_IDX=-1
-  Q_SQ=$insq
-  Q_DQ=$indq
-
-  # This models ordinary '...' and "..." quoting. Heredoc bodies are skipped by the
-  # caller before reaching here. What is left unmodelled is $'...', with its own escape
-  # rules, and $"..." locale translation — and those latch the scanner off rather than
-  # being guessed at.
-  #
-  # So don't guess at what isn't modelled — refuse to strip that line at all. Its
-  # comments then get scanned for URLs, which can only produce a false positive: a
-  # loud, visible complaint about a URL that needed no digest. Guessing instead risks
-  # the silent direction, dropping a real download from the line and passing it
-  # unverified. No definition here uses these forms, so the cost is theoretical and
-  # the safety is not.
-  # Once a construct we can't track appears, quote state is unknowable from here on — the
-  # line may open or close quotes in ways this scan would misread. Rather than carry a
-  # possibly-desynced state forward (which silently drops real downloads on later lines),
-  # latch into "don't strip anything else in this file". That can only over-report: URLs in
-  # comments get flagged, loudly, instead of real ones being dropped, quietly.
-  if [ "${Q_UNKNOWN:-0}" = 1 ]; then
-    return 0
-  fi
-  case "$line" in
-    *\$\'*|*\$\"*) Q_UNKNOWN=1; return 0 ;;
-  esac
-  while [ "$i" -lt "$n" ]; do
-    c="${line:$i:1}"
-    if [ "$insq" = 1 ]; then
-      [ "$c" = "'" ] && insq=0
-    elif [ "$indq" = 1 ]; then
-      case "$c" in
-        '\') i=$(( i + 1 )) ;;   # backslash escapes the next char inside "..."
-        '"') indq=0 ;;
-      esac
-    else
-      case "$c" in
-        "'") insq=1 ;;
-        '"') indq=1 ;;
-        '\') i=$(( i + 1 )) ;;
-        '#')
-          case "$prev" in
-            ''|[[:space:]]|';'|'&'|'|'|'('|')'|'<'|'>')
-              # A comment only opens outside quotes, so the line ends unquoted.
-              COMMENT_IDX=$i; Q_SQ=0; Q_DQ=0; return 0 ;;
-          esac
-          ;;
-      esac
-    fi
-    prev="$c"
-    i=$(( i + 1 ))
-  done
-  Q_SQ=$insq
-  Q_DQ=$indq
-  return 0
-}
-
-strip_comments() {
-  # Quote state is carried between lines, because quoting is not a per-line property: a
-  # string can hold a literal newline, and everything up to its closing quote is data.
-  # Restarting unquoted on each line made a `#` inside such a string look like a comment
-  # and truncated the rest of the line — taking any real download on it along too.
-  # Heredoc bodies are data, not shell: a `#` in them opens no comment and a quote in them
-  # closes nothing. Scanning them desynced quote state for the rest of the file, and
-  # 1.8.7-p374 really does contain one — with a URL inside a comment further down that
-  # depends on stripping still working. Skip the body outright; any URL in it is patch
-  # content, not a download.
-  local line insq=0 indq=0 out hd="" trimmed
-  local hd_re='<<-?[[:space:]]*["'"'"']?([A-Za-z_][A-Za-z0-9_]*)'
-  Q_UNKNOWN=0   # reset per file, not per line: the latch is file-scoped
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [ -n "$hd" ]; then
-      trimmed="${line#"${line%%[![:space:]]*}"}"   # <<- allows an indented terminator
-      if [ "$line" = "$hd" ] || [ "$trimmed" = "$hd" ]; then hd=""; fi
-      continue
-    fi
-
-    comment_index "$line" "$insq" "$indq"
-    insq=$Q_SQ
-    indq=$Q_DQ
-    if [ "$COMMENT_IDX" -ge 0 ]; then
-      out="${line:0:$COMMENT_IDX}"
-    else
-      out="$line"
-    fi
-    # Look for a heredoc opener in the code part only, so one mentioned in a comment
-    # doesn't start swallowing lines. `<<<` is a herestring with no body; arithmetic
-    # `<< 2` can't match because a delimiter has to start with a letter or underscore.
-    if [ "${out#*<<<}" = "$out" ] && [[ $out =~ $hd_re ]]; then
-      hd="${BASH_REMATCH[1]}"
-    fi
-    printf '%s\n' "$out"
-  done
-}
-
 trim_url() {
   local u="$1"
   while :; do
@@ -232,49 +116,48 @@ join_continuations() {
 # fetches and builds whatever it got, silently. A missing checksum is the kind of thing
 # that survives review, so assert it here.
 #
-# This checks EVERY url in the file, not just the ones on lines that look like an
-# install_package call. That inversion is the whole point. Matching invocations means
-# matching shell syntax, and shell has unboundedly many ways to spell the same call —
-# quoted, unquoted, line-continued, after `then` or `;` or `&&`, inside a function. Every
-# form the pattern doesn't know is a URL that goes uninspected, and the failure is silent:
-# it reports success having looked at nothing. Review found four such forms in a row here,
-# each time because the fix addressed the shape rather than the class.
+# Every URL in the file is considered, wherever it appears, and the ones that look like
+# source archives must carry a digest. No attempt is made to work out which are arguments
+# and which are prose — that question is what made earlier versions of this wrong.
 #
-# Checking every URL fails closed instead. A download in a syntax nobody anticipated gets
-# flagged rather than skipped, and the only way to exempt one is to say so explicitly
-# below — which is the right friction, since an unverified download is exactly what this
-# check exists to prevent.
+# The cost is that a tarball URL written in a comment gets flagged too. That is rare, it
+# says exactly what to do about it, and it errs loud rather than quiet. Reference links in
+# these definitions point at issues and repos, not tarballs, so it doesn't arise today.
+#
+# Not checked, deliberately: the config.guess and config.sub fetches in 1.8.7 and 1.9.3.
+# They come from GNU's git web view, which serves a moving HEAD with no release tarball
+# and no digest to cite. They aren't archives, so they fall outside this rule naturally
+# rather than needing an exemption list. The same is true of any future non-archive
+# download, which is the honest limitation of matching on shape.
 lint_checksums() {
-  heading "Checksums" "every download URL carries a #sha256"
-  local f url ok found
+  heading "Checksums" "every source archive carries a #sha256"
+  local f url base ok found
   for f in $(definitions); do
     ok=true
     found=0
     while IFS= read -r url; do
       url=$(trim_url "$url")
-      case "$url" in
-        # The only exempt downloads, matched as exact literals. config.guess and config.sub
-        # come from GNU's git web view, which serves a moving HEAD with no release tarball
-        # and no published digest. They only teach ancient configure scripts about modern
-        # architectures and are never linked into the built Ruby.
-        #
-        # Literals, not patterns, because every wildcard here is a hole: a domain glob
-        # exempts anything from the host, and `*f=config.guess*` also exempts
-        # `f=config.guess.anything`. Both were tried, both were wrong. Quoted so `?` and
-        # `;` are matched literally rather than as glob and case-clause syntax.
-        #
-        # If these URLs ever change shape, this list must be updated by hand — that is the
-        # intended cost of skipping verification on a download.
-        "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"|\
-        "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD") continue ;;
+      base=${url%%#*}
+      # Only archives are checked, and that is what removes the need to understand the
+      # shell around them. install_package fetches release tarballs, so a URL ending in
+      # an archive extension is a download; anything else is a reference.
+      #
+      # The alternative was deciding by position — is this URL an argument, or inside a
+      # comment, or inside a heredoc — which means tokenising shell, and that is where
+      # every bug in this check came from. Quoting, continuations, `;#`, ANSI-C strings,
+      # heredocs: each one handled, each one exposing the next. Matching on what the URL
+      # *is* needs none of it.
+      case "$base" in
+        *.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz2|*.tar.Z|*.zip) ;;
+        *) continue ;;
       esac
       found=$(( found + 1 ))
-      [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on ${url%%\#*}"; ok=false; }
-    done < <(join_continuations "$f" | strip_comments | grep -oE "$URL_RE")
-    # Every definition downloads at least Ruby itself. Finding nothing means the extractor
-    # stopped matching, not that the file is clean — don't call that a pass.
+      [[ $url =~ \#[0-9a-f]{64}$ ]] || { fail "$f: no sha256 on $base"; ok=false; }
+    done < <(join_continuations "$f" | grep -oE "$URL_RE")
+    # Every definition fetches at least Ruby itself as a tarball. Finding none means the
+    # extractor stopped matching, not that the file is clean — don't call that a pass.
     if [ "$found" -eq 0 ]; then
-      fail "$f: no download URLs found — checksum lint could not inspect this file"
+      fail "$f: no source archives found — checksum lint could not inspect this file"
       ok=false
     fi
     # Explicit if, not `$ok && pass`: that leaves the loop's exit status at 1 when
