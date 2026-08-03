@@ -38,7 +38,15 @@ install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler -v 1.17.3
 }
 
-RUBY_CFLAGS=""
+# -O3 because leaving this empty does not mean "use configure's default". ruby-build
+# exports it as CFLAGS, which supersedes configure's own optflags in the compile line, so
+# an empty value builds at -O0 — measured 2-3x slower than the same source at -O3.
+#
+# -fno-strict-overflow is mandatory here, not belt-and-braces. 1.8.7's fixnum overflow
+# checks assume signed overflow wraps, which is undefined behaviour that GCC exploits from
+# -O2 upward: without this flag a -O3 build silently evaluates 2**64 to 0 and types it
+# Fixnum. Wrong arithmetic, no warning, no crash. It costs nothing measurable.
+RUBY_CFLAGS="-O3 -fno-strict-overflow"
 case "$(cc -v 2>&1)" in
   *gcc*)
     RUBY_CFLAGS+=" -Wno-discarded-qualifiers"
