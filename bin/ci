@@ -63,6 +63,21 @@ comment_index() {
   local line="$1"
   local n=${#line} i=0 c prev="" insq=0 indq=0
   COMMENT_IDX=-1
+
+  # This models ordinary '...' and "..." quoting, and nothing else. Shell has more:
+  # $'...' has its own escape rules, $"..." is locale translation, and there are
+  # heredocs. Modelling each in turn is writing a shell lexer in bash, and every
+  # incomplete version of that is wrong in some new way.
+  #
+  # So don't guess at what isn't modelled — refuse to strip that line at all. Its
+  # comments then get scanned for URLs, which can only produce a false positive: a
+  # loud, visible complaint about a URL that needed no digest. Guessing instead risks
+  # the silent direction, dropping a real download from the line and passing it
+  # unverified. No definition here uses these forms, so the cost is theoretical and
+  # the safety is not.
+  case "$line" in
+    *\$\'*|*\$\"*) return 0 ;;
+  esac
   while [ "$i" -lt "$n" ]; do
     c="${line:$i:1}"
     if [ "$insq" = 1 ]; then
