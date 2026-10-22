@@ -1,3 +1,170 @@
+# Regexp compiler fixes backported from upstream Onigmo. Both are reachable from any
+# pattern a user can get into Regexp.new, and this Ruby is too old to ever get them from a
+# release. Quoted heredocs, because the first patch has a backslash line continuation that
+# an unquoted one would eat. --fuzz=0 so a patch that stops matching fails the build rather
+# than landing somewhere nearby; test/build asserts both fixes against the installed Ruby.
+#
+# https://github.com/ruby/ruby/pull/19020: nested bounded repeats overflow the int product
+# that decides whether to unroll a repeat inline, so Regexp.new("(?:.{90000,}){90000}")
+# starts unrolling an enormous program and never returns. Ruby only acts on a signal once
+# the C call returns, so SIGTERM doesn't stop it either. The product is compared by
+# division instead, and the program size is capped as it's emitted.
+build_package_patch_regexp_program_size_overflow() {
+  patch -p1 --fuzz=0 --force >&4 2>&1 <<'EOF'
+--- a/include/ruby/onigmo.h
++++ b/include/ruby/onigmo.h
+@@ -686,6 +686,7 @@
+ #define ONIGERR_NEVER_ENDING_RECURSION                       -221
+ #define ONIGERR_GROUP_NUMBER_OVER_FOR_CAPTURE_HISTORY        -222
+ #define ONIGERR_INVALID_CHAR_PROPERTY_NAME                   -223
++#define ONIGERR_TOO_BIG_COMPILED_PROGRAM                     -226
+ #define ONIGERR_INVALID_CODE_POINT_VALUE                     -400
+ #define ONIGERR_INVALID_WIDE_CHAR_VALUE                      -400
+ #define ONIGERR_TOO_BIG_WIDE_CHAR_VALUE                      -401
+--- a/regcomp.c
++++ b/regcomp.c
+@@ -203,6 +203,10 @@
+ static int
+ add_opcode(regex_t* reg, int opcode)
+ {
++  /* Every instruction passes here, so this is where a program that would
++     outgrow its offset type is stopped, while it is still being emitted. */
++  if (reg->used > MAX_COMPILED_PROGRAM_SIZE)
++    return ONIGERR_TOO_BIG_COMPILED_PROGRAM;
+   BBUF_ADD1(reg, opcode);
+   return 0;
+ }
+@@ -719,6 +723,10 @@
+ }
+ 
+ #define QUANTIFIER_EXPAND_LIMIT_SIZE   50
++/* (tlen * n <= QUANTIFIER_EXPAND_LIMIT_SIZE) without overflowing int: tlen
++   and n are each bounded by ONIG_MAX_REPEAT_NUM, but their product is not. */
++#define IS_EXPAND_LIMIT_OK(tlen, n) \
++  ((n) <= 0 || (tlen) <= QUANTIFIER_EXPAND_LIMIT_SIZE / (n))
+ #define CKN_ON   (ckn > 0)
+ 
+ #ifdef USE_COMBINATION_EXPLOSION_CHECK
+@@ -983,7 +991,7 @@
+     mod_tlen = tlen;
+ 
+   if (infinite &&
+-      (qn->lower <= 1 || tlen * qn->lower <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++      (qn->lower <= 1 || IS_EXPAND_LIMIT_OK(tlen, qn->lower))) {
+     if (qn->lower == 1 && tlen > QUANTIFIER_EXPAND_LIMIT_SIZE) {
+       len = SIZE_OP_JUMP;
+     }
+@@ -1009,8 +1017,8 @@
+     len = SIZE_OP_JUMP + tlen;
+   }
+   else if (!infinite && qn->greedy &&
+-           (qn->upper == 1 || (tlen + SIZE_OP_PUSH) * qn->upper
+-                                      <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++           (qn->upper == 1 ||
++            IS_EXPAND_LIMIT_OK(tlen + SIZE_OP_PUSH, qn->upper))) {
+     len = tlen * qn->lower;
+     len += (SIZE_OP_PUSH + tlen) * (qn->upper - qn->lower);
+   }
+@@ -1060,7 +1068,7 @@
+     mod_tlen = tlen;
+ 
+   if (infinite &&
+-      (qn->lower <= 1 || tlen * qn->lower <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++      (qn->lower <= 1 || IS_EXPAND_LIMIT_OK(tlen, qn->lower))) {
+     if (qn->lower == 1 && tlen > QUANTIFIER_EXPAND_LIMIT_SIZE) {
+       if (qn->greedy) {
+ #ifdef USE_OP_PUSH_OR_JUMP_EXACT
+@@ -1130,8 +1138,8 @@
+     r = compile_tree(qn->target, reg);
+   }
+   else if (!infinite && qn->greedy &&
+-           (qn->upper == 1 || (tlen + SIZE_OP_PUSH) * qn->upper
+-                                  <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++           (qn->upper == 1 ||
++            IS_EXPAND_LIMIT_OK(tlen + SIZE_OP_PUSH, qn->upper))) {
+     int n = qn->upper - qn->lower;
+ 
+     r = compile_tree_n_times(qn->target, qn->lower, reg);
+--- a/regerror.c
++++ b/regerror.c
+@@ -165,6 +165,8 @@
+     p = "group number is too big for capture history"; break;
+   case ONIGERR_INVALID_CHAR_PROPERTY_NAME:
+     p = "invalid character property name {%n}"; break;
++  case ONIGERR_TOO_BIG_COMPILED_PROGRAM:
++    p = "too big compiled program"; break;
+   case ONIGERR_TOO_MANY_CAPTURE_GROUPS:
+     p = "too many capture groups are specified"; break;
+   case ONIGERR_INVALID_CODE_POINT_VALUE:
+--- a/regint.h
++++ b/regint.h
+@@ -372,6 +372,11 @@
+ 
+ #define INT_MAX_LIMIT           ((1UL << (SIZEOF_INT * 8 - 1)) - 1)
+ 
++/* Program offsets are RelAddrType, and the compile_length_*() functions sum
++   into int, so a larger program would wrap both.  The quarter leaves room
++   for the sums the offset arithmetic makes out of those lengths. */
++#define MAX_COMPILED_PROGRAM_SIZE  ((unsigned int )(INT_MAX_LIMIT / 4))
++
+ #define DIGITVAL(code)    ((code) - '0')
+ #define ODIGITVAL(code)   DIGITVAL(code)
+ #define XDIGITVAL(enc,code) \
+EOF
+}
+
+# https://github.com/ruby/ruby/pull/16801 (CVE-2026-110264): more than 32,767 range repeats
+# or null checks in one pattern wrap their signed 16-bit ID negative. A negative repeat ID
+# indexes the match-time repeat stack, so Regexp.new("(?:foobar){0,100}" * 100000) =~ "x"
+# writes out of bounds and segfaults. Both are now a RegexpError at compile time. Applies on top of the patch above, whose lines are
+# part of its context.
+build_package_patch_regexp_repeat_id_overflow() {
+  patch -p1 --fuzz=0 --force >&4 2>&1 <<'EOF'
+--- a/include/ruby/onigmo.h
++++ b/include/ruby/onigmo.h
+@@ -686,6 +686,8 @@
+ #define ONIGERR_NEVER_ENDING_RECURSION                       -221
+ #define ONIGERR_GROUP_NUMBER_OVER_FOR_CAPTURE_HISTORY        -222
+ #define ONIGERR_INVALID_CHAR_PROPERTY_NAME                   -223
++#define ONIGERR_TOO_MANY_RANGE_REPEAT                        -224
++#define ONIGERR_TOO_MANY_NULL_CHECK                          -225
+ #define ONIGERR_TOO_BIG_COMPILED_PROGRAM                     -226
+ #define ONIGERR_INVALID_CODE_POINT_VALUE                     -400
+ #define ONIGERR_INVALID_WIDE_CHAR_VALUE                      -400
+--- a/regcomp.c
++++ b/regcomp.c
+@@ -378,6 +378,7 @@
+     r = add_mem_num(reg, reg->num_null_check); /* NULL CHECK ID */
+     if (r) return r;
+     reg->num_null_check++;
++    if ((MemNumType)reg->num_null_check <= 0) return ONIGERR_TOO_MANY_NULL_CHECK;
+   }
+ 
+   r = compile_tree(node, reg);
+@@ -687,6 +688,7 @@
+   if (r) return r;
+   r = add_mem_num(reg, num_repeat); /* OP_REPEAT ID */
+   reg->num_repeat++;
++  if ((MemNumType)reg->num_repeat <= 0) return ONIGERR_TOO_MANY_RANGE_REPEAT;
+   if (r) return r;
+   r = add_rel_addr(reg, target_len + SIZE_OP_REPEAT_INC);
+   if (r) return r;
+--- a/regerror.c
++++ b/regerror.c
+@@ -165,6 +165,10 @@
+     p = "group number is too big for capture history"; break;
+   case ONIGERR_INVALID_CHAR_PROPERTY_NAME:
+     p = "invalid character property name {%n}"; break;
++  case ONIGERR_TOO_MANY_RANGE_REPEAT:
++    p = "too many range repeat"; break;
++  case ONIGERR_TOO_MANY_NULL_CHECK:
++    p = "too many null check"; break;
+   case ONIGERR_TOO_BIG_COMPILED_PROGRAM:
+     p = "too big compiled program"; break;
+   case ONIGERR_TOO_MANY_CAPTURE_GROUPS:
+EOF
+}
+
 install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler:1.17.3
   "$PREFIX_PATH"/bin/gem install bundler:2.4.22
@@ -35,5 +202,5 @@ package_option ruby configure --with-baseruby=no
 package_option ruby configure --with-out-ext=tcl --with-out-ext=tk --disable-install-doc
 
 install_package "openssl-1.1.1w" "https://www.openssl.org/source/openssl-1.1.1w.tar.gz#cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8" openssl
-install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0" enable_shared standard
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0" patch_regexp_program_size_overflow patch_regexp_repeat_id_overflow enable_shared standard
 install_bundler

@@ -47,6 +47,29 @@ aborts with `*** buffer overflow detected ***`. This isn't a hardening regressio
 does nothing without optimization, so while these were building at `-O0` there was none at
 all. Only 1.9.3 needs the cap.
 
+### Regexp compiler fixes
+
+1.9.3 through 2.7.8 carry backports of two regexp compiler fixes, applied to the release
+tarball before `configure` (the `patch_regexp_*` steps in each definition). Both are
+reachable from any pattern a user can get into `Regexp.new`:
+
+- [ruby/ruby#16801](https://github.com/ruby/ruby/pull/16801) (CVE-2026-110264): more than
+  32,767 range repeats or null checks in one pattern wrap a 16-bit ID negative. For range
+  repeats the first match then writes out of bounds: `Regexp.new("(?:foobar){0,100}" *
+  100000) =~ "x"` crashes the process. Patched, both are a `RegexpError`.
+- [ruby/ruby#19020](https://github.com/ruby/ruby/pull/19020): nested bounded repeats
+  overflow the size arithmetic, so `Regexp.new("(?:.{90000,}){90000}")` never returns,
+  and doesn't answer SIGTERM either. Patched, it compiles at once.
+
+The other two fixes in the same family, ruby/ruby#13332 and
+[Bug #22384](https://bugs.ruby-lang.org/issues/22384), fix a double free that later Rubies
+introduced, so there's nothing to backport. 1.8.7 predates Onigmo: its own engine caps
+quantifiers at 32,767 and a compiled pattern at 64 KB, and rejects all of these with a
+`RegexpError`.
+
+`test/build` asserts each fix against the installed Ruby, so a patch that stops applying
+fails the build rather than shipping an unpatched Ruby quietly.
+
 ### Prerequisites
 
 **macOS:** Xcode command line tools and [Homebrew](https://brew.sh).
