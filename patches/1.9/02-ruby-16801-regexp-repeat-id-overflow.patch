@@ -1,0 +1,49 @@
+https://github.com/ruby/ruby/pull/16801 (CVE-2026-110264): more than 32,767 range repeats
+or null checks in one pattern wrap their signed 16-bit ID negative. A negative repeat ID
+indexes the match-time repeat stack, so Regexp.new("(?:foobar){0,100}" * 100000) =~ "x"
+writes out of bounds and segfaults. Both are now a RegexpError at compile time.
+Applies on top of 01-ruby-19020-regexp-program-size-overflow.patch, whose lines are part
+of its context.
+
+--- a/include/ruby/oniguruma.h
++++ b/include/ruby/oniguruma.h
+@@ -554,6 +554,8 @@
+ #define ONIGERR_NEVER_ENDING_RECURSION                       -221
+ #define ONIGERR_GROUP_NUMBER_OVER_FOR_CAPTURE_HISTORY        -222
+ #define ONIGERR_INVALID_CHAR_PROPERTY_NAME                   -223
++#define ONIGERR_TOO_MANY_RANGE_REPEAT                        -224
++#define ONIGERR_TOO_MANY_NULL_CHECK                          -225
+ #define ONIGERR_TOO_BIG_COMPILED_PROGRAM                     -226
+ #define ONIGERR_INVALID_CODE_POINT_VALUE                     -400
+ #define ONIGERR_INVALID_WIDE_CHAR_VALUE                      -400
+--- a/regcomp.c
++++ b/regcomp.c
+@@ -377,6 +377,7 @@
+     r = add_mem_num(reg, reg->num_null_check); /* NULL CHECK ID */
+     if (r) return r;
+     reg->num_null_check++;
++    if ((MemNumType)reg->num_null_check <= 0) return ONIGERR_TOO_MANY_NULL_CHECK;
+   }
+ 
+   r = compile_tree(node, reg);
+@@ -697,6 +698,7 @@
+   if (r) return r;
+   r = add_mem_num(reg, num_repeat); /* OP_REPEAT ID */
+   reg->num_repeat++;
++  if ((MemNumType)reg->num_repeat <= 0) return ONIGERR_TOO_MANY_RANGE_REPEAT;
+   if (r) return r;
+   r = add_rel_addr(reg, target_len + SIZE_OP_REPEAT_INC);
+   if (r) return r;
+--- a/regerror.c
++++ b/regerror.c
+@@ -168,6 +168,10 @@
+     p = "group number is too big for capture history"; break;
+   case ONIGERR_INVALID_CHAR_PROPERTY_NAME:
+     p = "invalid character property name {%n}"; break;
++  case ONIGERR_TOO_MANY_RANGE_REPEAT:
++    p = "too many range repeat"; break;
++  case ONIGERR_TOO_MANY_NULL_CHECK:
++    p = "too many null check"; break;
+   case ONIGERR_TOO_BIG_COMPILED_PROGRAM:
+     p = "too big compiled program"; break;
+   case ONIGERR_NOT_SUPPORTED_ENCODING_COMBINATION:

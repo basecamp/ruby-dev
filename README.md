@@ -50,7 +50,8 @@ all. Only 1.9.3 needs the cap.
 ### Regexp compiler fixes
 
 1.9.3 through 2.7.8 carry backports of two regexp compiler fixes, applied to the release
-tarball before `configure` (the `patch_regexp_*` steps in each definition). Both are
+tarball before `configure`. The patches live in `patches/<major.minor>/`, and each
+definition's `apply_patches` step applies its series in name order. Both fixes are
 reachable from any pattern a user can get into `Regexp.new`:
 
 - [ruby/ruby#16801](https://github.com/ruby/ruby/pull/16801) (CVE-2026-110264): more than
@@ -135,6 +136,10 @@ Or grab a single definition without cloning:
 curl -O https://raw.githubusercontent.com/basecamp/ruby-dev/main/1.8.7-p374
 rbenv install ./1.8.7-p374
 ```
+
+That works for 1.8.7 only. 1.9.3 through 2.7.8 apply patches from `patches/` beside the
+definition (see [Regexp compiler fixes](#regexp-compiler-fixes)), so they need the checkout;
+on their own they stop with an error rather than build without them.
 
 (Note the leading `./` - this is a path to a specific build definition for ruby-build, not a version specific for it to look for among its built-in definitions.)
 
