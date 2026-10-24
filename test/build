@@ -304,6 +304,23 @@ case " $platforms " in
       exit 1
     fi
     echo "Using ruby-build: $RUBY_BUILD"
+
+    # The definitions `brew install` what they need, and parallel native builds then race
+    # for Homebrew's lock: each one auto-updates first, and the losers die within seconds
+    # on "Another `brew update` process is already running". Install everything the chosen
+    # definitions ask for once, here, one at a time, then turn auto-update off so their own
+    # `brew install`s are no-ops on installed formulae, which run side by side fine.
+    if command -v brew >/dev/null 2>&1; then
+      formulae=$(grep -ho 'brew install [^ ;&|)]*' $versions 2>/dev/null | awk '{ print $3 }' | sort -u || true)
+      for formula in $formulae; do
+        echo "Installing $formula for the native builds..."
+        if ! brew install "$formula" >/dev/null 2>&1; then
+          echo "error: 'brew install $formula' failed; run it yourself to see why." >&2
+          exit 1
+        fi
+      done
+      export HOMEBREW_NO_AUTO_UPDATE=1
+    fi
     ;;
 esac
 
