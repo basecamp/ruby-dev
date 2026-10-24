@@ -27,9 +27,11 @@ RUN apt-get update && apt-get install -y \
 RUN git clone https://github.com/rbenv/ruby-build.git /opt/ruby-build \
     && /opt/ruby-build/install.sh
 
-# Copy build definitions (all version files from repo root)
+# Copy build definitions (all version files from repo root) and the patches they apply,
+# which they find beside themselves
 WORKDIR /definitions
 COPY [0-9]* ./
+COPY patches/ ./patches/
 
 ENV RUBY_BUILD_DEFINITIONS=/definitions
 

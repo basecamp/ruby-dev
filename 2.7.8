@@ -1,3 +1,23 @@
+# Regexp compiler fixes backported from upstream Onigmo (README, "Regexp compiler fixes"):
+# every patches/2.7/*.patch, in name order, applied to the tarball before configure.
+# --fuzz=0 so a patch that stops matching fails the build rather than landing somewhere
+# nearby; test/build asserts each fix against the installed Ruby. The patches live in the
+# checkout beside this file, so a definition fetched on its own stops here rather than
+# build a Ruby without them.
+RUBY_DEV_PATCHES="$(cd "$(dirname "$DEFINITION_PATH")" 2>/dev/null && pwd)/patches/2.7"
+if [ ! -d "$RUBY_DEV_PATCHES" ]; then
+  echo "ruby-dev: patches/2.7 not found beside this definition. Build it from a checkout" >&2
+  echo "of https://github.com/basecamp/ruby-dev, not a copy of the definition file alone." >&2
+  exit 1
+fi
+
+build_package_apply_patches() {
+  local patch
+  for patch in "$RUBY_DEV_PATCHES"/*.patch; do
+    patch -p1 --fuzz=0 --force <"$patch" >&4 2>&1
+  done
+}
+
 install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler:1.17.3
   "$PREFIX_PATH"/bin/gem install bundler:2.4.22
@@ -35,5 +55,5 @@ package_option ruby configure --with-baseruby=no
 package_option ruby configure --with-out-ext=tcl --with-out-ext=tk --disable-install-doc
 
 install_package "openssl-1.1.1w" "https://www.openssl.org/source/openssl-1.1.1w.tar.gz#cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8" openssl
-install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0" enable_shared standard
+install_package "ruby-2.7.8" "https://cache.ruby-lang.org/pub/ruby/2.7/ruby-2.7.8.tar.gz#c2dab63cbc8f2a05526108ad419efa63a67ed4074dbbcf9fc2b1ca664cb45ba0" apply_patches enable_shared standard
 install_bundler

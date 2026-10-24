@@ -1,0 +1,105 @@
+https://github.com/ruby/ruby/pull/19020: nested bounded repeats overflow the int product
+that decides whether to unroll a repeat inline, so Regexp.new("(?:.{90000,}){90000}")
+starts unrolling an enormous program and never returns. Ruby only acts on a signal once
+the C call returns, so SIGTERM doesn't stop it either. The product is compared by
+division instead, and the program size is capped as it's emitted.
+
+--- a/include/ruby/onigmo.h
++++ b/include/ruby/onigmo.h
+@@ -686,6 +686,7 @@
+ #define ONIGERR_NEVER_ENDING_RECURSION                       -221
+ #define ONIGERR_GROUP_NUMBER_OVER_FOR_CAPTURE_HISTORY        -222
+ #define ONIGERR_INVALID_CHAR_PROPERTY_NAME                   -223
++#define ONIGERR_TOO_BIG_COMPILED_PROGRAM                     -226
+ #define ONIGERR_INVALID_CODE_POINT_VALUE                     -400
+ #define ONIGERR_INVALID_WIDE_CHAR_VALUE                      -400
+ #define ONIGERR_TOO_BIG_WIDE_CHAR_VALUE                      -401
+--- a/regcomp.c
++++ b/regcomp.c
+@@ -203,6 +203,10 @@
+ static int
+ add_opcode(regex_t* reg, int opcode)
+ {
++  /* Every instruction passes here, so this is where a program that would
++     outgrow its offset type is stopped, while it is still being emitted. */
++  if (reg->used > MAX_COMPILED_PROGRAM_SIZE)
++    return ONIGERR_TOO_BIG_COMPILED_PROGRAM;
+   BBUF_ADD1(reg, opcode);
+   return 0;
+ }
+@@ -719,6 +723,10 @@
+ }
+ 
+ #define QUANTIFIER_EXPAND_LIMIT_SIZE   50
++/* (tlen * n <= QUANTIFIER_EXPAND_LIMIT_SIZE) without overflowing int: tlen
++   and n are each bounded by ONIG_MAX_REPEAT_NUM, but their product is not. */
++#define IS_EXPAND_LIMIT_OK(tlen, n) \
++  ((n) <= 0 || (tlen) <= QUANTIFIER_EXPAND_LIMIT_SIZE / (n))
+ #define CKN_ON   (ckn > 0)
+ 
+ #ifdef USE_COMBINATION_EXPLOSION_CHECK
+@@ -983,7 +991,7 @@
+     mod_tlen = tlen;
+ 
+   if (infinite &&
+-      (qn->lower <= 1 || tlen * qn->lower <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++      (qn->lower <= 1 || IS_EXPAND_LIMIT_OK(tlen, qn->lower))) {
+     if (qn->lower == 1 && tlen > QUANTIFIER_EXPAND_LIMIT_SIZE) {
+       len = SIZE_OP_JUMP;
+     }
+@@ -1009,8 +1017,8 @@
+     len = SIZE_OP_JUMP + tlen;
+   }
+   else if (!infinite && qn->greedy &&
+-           (qn->upper == 1 || (tlen + SIZE_OP_PUSH) * qn->upper
+-                                      <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++           (qn->upper == 1 ||
++            IS_EXPAND_LIMIT_OK(tlen + SIZE_OP_PUSH, qn->upper))) {
+     len = tlen * qn->lower;
+     len += (SIZE_OP_PUSH + tlen) * (qn->upper - qn->lower);
+   }
+@@ -1060,7 +1068,7 @@
+     mod_tlen = tlen;
+ 
+   if (infinite &&
+-      (qn->lower <= 1 || tlen * qn->lower <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++      (qn->lower <= 1 || IS_EXPAND_LIMIT_OK(tlen, qn->lower))) {
+     if (qn->lower == 1 && tlen > QUANTIFIER_EXPAND_LIMIT_SIZE) {
+       if (qn->greedy) {
+ #ifdef USE_OP_PUSH_OR_JUMP_EXACT
+@@ -1130,8 +1138,8 @@
+     r = compile_tree(qn->target, reg);
+   }
+   else if (!infinite && qn->greedy &&
+-           (qn->upper == 1 || (tlen + SIZE_OP_PUSH) * qn->upper
+-                                  <= QUANTIFIER_EXPAND_LIMIT_SIZE)) {
++           (qn->upper == 1 ||
++            IS_EXPAND_LIMIT_OK(tlen + SIZE_OP_PUSH, qn->upper))) {
+     int n = qn->upper - qn->lower;
+ 
+     r = compile_tree_n_times(qn->target, qn->lower, reg);
+--- a/regerror.c
++++ b/regerror.c
+@@ -165,6 +165,8 @@
+     p = "group number is too big for capture history"; break;
+   case ONIGERR_INVALID_CHAR_PROPERTY_NAME:
+     p = "invalid character property name {%n}"; break;
++  case ONIGERR_TOO_BIG_COMPILED_PROGRAM:
++    p = "too big compiled program"; break;
+   case ONIGERR_TOO_MANY_CAPTURE_GROUPS:
+     p = "too many capture groups are specified"; break;
+   case ONIGERR_INVALID_CODE_POINT_VALUE:
+--- a/regint.h
++++ b/regint.h
+@@ -372,6 +372,11 @@
+ 
+ #define INT_MAX_LIMIT           ((1UL << (SIZEOF_INT * 8 - 1)) - 1)
+ 
++/* Program offsets are RelAddrType, and the compile_length_*() functions sum
++   into int, so a larger program would wrap both.  The quarter leaves room
++   for the sums the offset arithmetic makes out of those lengths. */
++#define MAX_COMPILED_PROGRAM_SIZE  ((unsigned int )(INT_MAX_LIMIT / 4))
++
+ #define DIGITVAL(code)    ((code) - '0')
+ #define ODIGITVAL(code)   DIGITVAL(code)
+ #define XDIGITVAL(enc,code) \

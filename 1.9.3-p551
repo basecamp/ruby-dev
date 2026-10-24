@@ -15,6 +15,26 @@ build_package_freshen_automake_config() {
   } >&4 2>&1
 }
 
+# Regexp compiler fixes backported from upstream Onigmo (README, "Regexp compiler fixes"):
+# every patches/1.9/*.patch, in name order, applied to the tarball before configure.
+# --fuzz=0 so a patch that stops matching fails the build rather than landing somewhere
+# nearby; test/build asserts each fix against the installed Ruby. The patches live in the
+# checkout beside this file, so a definition fetched on its own stops here rather than
+# build a Ruby without them.
+RUBY_DEV_PATCHES="$(cd "$(dirname "$DEFINITION_PATH")" 2>/dev/null && pwd)/patches/1.9"
+if [ ! -d "$RUBY_DEV_PATCHES" ]; then
+  echo "ruby-dev: patches/1.9 not found beside this definition. Build it from a checkout" >&2
+  echo "of https://github.com/basecamp/ruby-dev, not a copy of the definition file alone." >&2
+  exit 1
+fi
+
+build_package_apply_patches() {
+  local patch
+  for patch in "$RUBY_DEV_PATCHES"/*.patch; do
+    patch -p1 --fuzz=0 --force <"$patch" >&4 2>&1
+  done
+}
+
 install_bundler() {
   "$PREFIX_PATH"/bin/gem install bundler -v 1.17.3
 }
@@ -80,5 +100,5 @@ build_package_standard_serial() {
   } >&4 2>&1
 }
 
-install_package "ruby-1.9.3-p551" "https://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p551.tar.bz2#b0c5e37e3431d58613a160504b39542ec687d473de1d4da983dabcf3c5de771e" freshen_automake_config standard_serial
+install_package "ruby-1.9.3-p551" "https://cache.ruby-lang.org/pub/ruby/1.9/ruby-1.9.3-p551.tar.bz2#b0c5e37e3431d58613a160504b39542ec687d473de1d4da983dabcf3c5de771e" freshen_automake_config apply_patches standard_serial
 install_bundler

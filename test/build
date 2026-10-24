@@ -132,12 +132,27 @@ build_image() {
 # compiles cleanly, runs, loads every library below — and evaluates 2**64 to 0. Nothing
 # above this line would notice, so any change to optimization flags could ship silent wrong
 # arithmetic. Kept 1.8.7-compatible: no interpolation-free heredocs, no modern syntax.
+#
+# The regexp checks assert the Onigmo fixes the definitions patch in (README, "Regexp
+# compiler fixes"). A patch that stops applying fails its own build step, but one that is
+# dropped from a step list, or that applies and no longer takes, would otherwise ship a
+# Ruby that crashes on its first match of a hostile pattern. Unpatched, the first two
+# compile (the first then crashes when matched). The last two cover the two halves of
+# ruby/ruby#19020, so each is checked on its own: the nested repeat is a valid pattern that
+# must compile, promptly, and not match "x" (unpatched it never returns and ignores SIGTERM),
+# and 21475 large repeats must hit the compiled-program size cap (unpatched they compile).
+# Both run in a child with a deadline and are put down with KILL. 1.8.7 predates Onigmo;
+# its engine refuses every one of these with its own RegexpError, accepted below.
 default_verify_script() {
   cat <<'VERIFY'
 "$RUBY_PREFIX"/bin/ruby -e 'require "openssl"; puts "openssl: #{OpenSSL::OPENSSL_VERSION}"'
 "$RUBY_PREFIX"/bin/ruby -e 'require "digest/sha2"; puts "digest: ok"'
 "$RUBY_PREFIX"/bin/ruby -e 'require "zlib"; puts "zlib: ok"'
 "$RUBY_PREFIX"/bin/ruby -e 'raise "2**64 wrong: #{2**64}" unless (2**64).to_s == "18446744073709551616"; raise "2**100 wrong" unless (2**100).to_s == "1267650600228229401496703205376"; raise "mul overflow wrong" unless (4611686018427387903 * 2).to_s == "9223372036854775806"; raise "negative overflow wrong" unless (-2**64).to_s == "-18446744073709551616"; raise "10**20 wrong" unless (10**20).to_s == "100000000000000000000"; puts "arithmetic: ok"'
+"$RUBY_PREFIX"/bin/ruby -e 'begin; Regexp.new("(?:foobar){0,100}" * 100000); rescue RegexpError => e; raise "unexpected RegexpError: #{e.message[0, 80]}" unless e.message =~ /\Atoo many range repeat|\Aregular expression too big/; puts "regexp repeat ids: ok"; else; raise "ruby/ruby#16801 not applied: 100000 range repeats compiled"; end'
+"$RUBY_PREFIX"/bin/ruby -e 'begin; Regexp.new("(?:(?:foo)?|(?:bar)?)*" * 100000); rescue RegexpError => e; raise "unexpected RegexpError: #{e.message[0, 80]}" unless e.message =~ /\Atoo many null check|\Aregular expression too big/; puts "regexp null checks: ok"; else; raise "ruby/ruby#16801 not applied: 100000 null checks compiled"; end'
+"$RUBY_PREFIX"/bin/ruby -e 'pid = fork { st = begin; Regexp.new("(?:.{90000,}){90000}") !~ "x" ? 0 : 3; rescue RegexpError; RUBY_VERSION < "1.9" ? 0 : 2; end; exit!(st) }; deadline = Time.now + 30; until Process.wait(pid, Process::WNOHANG); if Time.now > deadline; Process.kill("KILL", pid); Process.wait(pid); raise "ruby/ruby#19020 not applied: a nested repeat took over 30s to compile"; end; sleep 0.1; end; raise "a valid nested repeat raised RegexpError" if $?.exitstatus == 2; raise "a nested repeat matched \"x\"" if $?.exitstatus == 3; raise "nested repeat compile died: #{$?.inspect}" unless $?.success?; puts "regexp nested repeat: ok"'
+"$RUBY_PREFIX"/bin/ruby -e 'pid = fork { st = begin; Regexp.new(".{100000,}" * 21475); 3; rescue RegexpError => e; e.message =~ /\Atoo big compiled program|\Atoo big quantifier/ ? 0 : 2; end; exit!(st) }; deadline = Time.now + 30; until Process.wait(pid, Process::WNOHANG); if Time.now > deadline; Process.kill("KILL", pid); Process.wait(pid); raise "ruby/ruby#19020 not applied: an oversized program took over 30s to compile"; end; sleep 0.1; end; raise "ruby/ruby#19020 not applied: 21475 large repeats compiled past the program size cap" if $?.exitstatus == 3; raise "unexpected RegexpError for an oversized program" if $?.exitstatus == 2; raise "oversized program compile died: #{$?.inspect}" unless $?.success?; puts "regexp program size cap: ok"'
 VERIFY
 }
 
