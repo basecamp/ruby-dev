@@ -34,9 +34,11 @@ JOBS=${JOBS:-$(( CORES / 2 ))}
 (( JOBS > 16 )) && JOBS=16
 MAKE_JOBS=${MAKE_JOBS:-4}
 
-# Use multi-platform builder if available (faster cross-arch builds)
+# Use multi-platform builder if available (faster cross-arch builds). Plain grep to
+# /dev/null, not `grep -q`: under pipefail, -q exiting early can SIGPIPE the writer and
+# fail the whole test (bin/ci's signoff check lost runs to exactly that).
 BUILDER=""
-if docker buildx ls 2>/dev/null | grep -A2 "^multiarch" | grep -q "running"; then
+if docker buildx ls 2>/dev/null | grep -A2 "^multiarch" | grep "running" >/dev/null; then
   BUILDER="multiarch"
 fi
 

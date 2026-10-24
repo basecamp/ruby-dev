@@ -224,7 +224,10 @@ build_matrix() {
 # --- Signoff ----------------------------------------------------------------
 signoff() {
   heading "📋 Signoff" "gh signoff"
-  if ! command -v gh >/dev/null || ! gh extension list 2>/dev/null | grep -q gh-signoff; then
+  # Not `grep -q`: it exits at the first match, gh dies writing the rest of its list
+  # (SIGPIPE, 141), and pipefail reports the pipeline as failed. That skipped the signoff
+  # on most green runs, while CI still exited 0. Plain grep reads to the end.
+  if ! command -v gh >/dev/null || ! gh extension list 2>/dev/null | grep gh-signoff >/dev/null; then
     printf '%s  – skipped: gh signoff not installed (gh extension install basecamp/gh-signoff)%s\n' \
       "$SUBTITLE" "$RESET"
     return 0
