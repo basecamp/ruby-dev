@@ -1,0 +1,4 @@
+# Agent worktrees under .claude/ are whole extra checkouts of this repo; the test images
+# copy only what they build from, so neither they nor .git belong in the build context.
+.claude
+.git
